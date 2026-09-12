@@ -140,13 +140,15 @@ class GPTSoVITSEngine(Engine):
 
             version = engine_config.extra.get("version", _DEFAULT_VERSION)
             config = {
-                "device": "cuda",
-                "is_half": bool(engine_config.extra.get("is_half", True)),
-                "version": version,
-                "t2s_weights_path": str(paths["t2s_weights_path"]),
-                "vits_weights_path": str(paths["vits_weights_path"]),
-                "bert_base_path": str(paths["bert_base_path"]),
-                "cnhuhbert_base_path": str(paths["cnhuhbert_base_path"]),
+                "custom": {
+                    "device": "cuda",
+                    "is_half": bool(engine_config.extra.get("is_half", True)),
+                    "version": version,
+                    "t2s_weights_path": str(paths["t2s_weights_path"]),
+                    "vits_weights_path": str(paths["vits_weights_path"]),
+                    "bert_base_path": str(paths["bert_base_path"]),
+                    "cnhuhbert_base_path": str(paths["cnhuhbert_base_path"]),
+                }
             }
 
             self._tts = TTS(config)
