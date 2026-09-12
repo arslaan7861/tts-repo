@@ -16,11 +16,14 @@ from pathlib import Path
 
 from charvoice.config import Config, EngineConfig
 
-# Copied from the repo clone into the Drive project folder on first mount
-# only -- see _seed_drive_project_dir. Model checkpoints are deliberately
-# excluded: they are large and belong in Drive's own models/ once fetched
-# there directly, not duplicated from the repo clone.
-_SEED_ENTRIES = ("voices", "scripts", "config.yaml")
+# Copied from the repo clone into the Drive project folder -- see
+# _seed_drive_project_dir. Model checkpoints are deliberately excluded: they
+# are large and belong in Drive's own models/ once fetched there directly,
+# not duplicated from the repo clone. `voices/` is seeded per-character-folder
+# (see below) rather than whole-or-nothing, so a character added to the repo
+# later still reaches Drive; scripts/config.yaml are copied once, whole, since
+# partially merging a user's edited config.yaml would be worse than skipping it.
+_SEED_WHOLE_ENTRIES = ("scripts", "config.yaml")
 
 
 def in_colab() -> bool:
@@ -75,22 +78,46 @@ def setup_colab_environment(
     return repo_dir
 
 
+def _seed_voice_profiles(project_dir: Path, repo_dir: Path) -> None:
+    """Copy any character folder from the repo that Drive doesn't have yet.
+
+    Per-folder, not whole-or-nothing: a character added to the repo after
+    Drive was first seeded (e.g. a new `voices/peter1/`) must still reach
+    Drive on a later mount. An existing Drive character folder -- the user's
+    own edits, or a profile already seeded -- is never touched, so this is
+    safe to run on every mount, not just the first.
+    """
+    src_voices = repo_dir / "voices"
+    if not src_voices.is_dir():
+        return
+
+    dest_voices = project_dir / "voices"
+    dest_voices.mkdir(parents=True, exist_ok=True)
+
+    for character_dir in sorted(p for p in src_voices.iterdir() if p.is_dir()):
+        dest = dest_voices / character_dir.name
+        if dest.exists():
+            continue
+        shutil.copytree(character_dir, dest)
+        print(f"  copied voices/{character_dir.name}")
+
+
 def _seed_drive_project_dir(project_dir: Path, repo_dir: Path) -> None:
-    """Copy voices/scripts/config.yaml into an empty Drive project folder.
+    """Copy starter voices/scripts/config.yaml into the Drive project folder.
 
     A freshly mounted Drive folder has none of this -- only the git clone
     does. Without seeding, `config.resolve("voices")` would silently point
     at an empty Drive directory and every profile lookup would report
-    "no voice profile" even though the repo's profiles are right there
-    (the bug this function exists to prevent). Only runs when the Drive
-    folder doesn't already have its own `voices/`, so a user's edits there
-    are never overwritten on a later mount.
+    "no voice profile" even though the repo's profiles are right there (the
+    bug this function exists to prevent). Voice profiles are seeded per
+    character folder on every call (see `_seed_voice_profiles`); `scripts/`
+    and `config.yaml` are copied once, whole, only if Drive doesn't have its
+    own copy yet.
     """
-    if (project_dir / "voices").exists():
-        return  # already seeded (or the user built their own) -- don't touch it
+    print(f"Seeding {project_dir} with any new starter files from the repo...")
+    _seed_voice_profiles(project_dir, repo_dir)
 
-    print(f"First time using {project_dir}: copying starter files from the repo...")
-    for name in _SEED_ENTRIES:
+    for name in _SEED_WHOLE_ENTRIES:
         src = repo_dir / name
         dest = project_dir / name
         if not src.exists() or dest.exists():

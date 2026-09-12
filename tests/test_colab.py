@@ -47,22 +47,45 @@ def test_seed_copies_voices_scripts_config(tmp_path):
     assert (project_dir / "config.yaml").is_file()
 
 
-def test_seed_is_a_noop_when_voices_already_exists(tmp_path):
-    """An existing Drive voices/ (the user's own edits) must never be overwritten."""
+def test_seed_does_not_overwrite_an_existing_character_folder(tmp_path):
+    """A Drive character folder -- the user's own edits -- is never touched,
+    even though missing characters are still added alongside it (per-folder
+    seeding, not whole-or-nothing)."""
     repo_dir = tmp_path / "repo"
     (repo_dir / "voices" / "narrator").mkdir(parents=True)
     (repo_dir / "voices" / "narrator" / "profile.yaml").write_text("engine: dummy\n")
 
     project_dir = tmp_path / "drive_project"
-    custom_dir = project_dir / "voices" / "custom-character"
+    custom_dir = project_dir / "voices" / "narrator"
     custom_dir.mkdir(parents=True)
-    (custom_dir / "profile.yaml").write_text("engine: gpt-sovits\n")
+    (custom_dir / "profile.yaml").write_text("engine: gpt-sovits  # hand-edited\n")
 
     _seed_drive_project_dir(project_dir, repo_dir)
 
-    # the user's own profile is untouched, and narrator was NOT copied in
-    assert (project_dir / "voices" / "custom-character" / "profile.yaml").is_file()
-    assert not (project_dir / "voices" / "narrator").exists()
+    # the user's hand-edited narrator profile is untouched
+    text = (project_dir / "voices" / "narrator" / "profile.yaml").read_text()
+    assert "hand-edited" in text
+
+
+def test_seed_adds_a_character_added_to_the_repo_later(tmp_path):
+    """The real bug this guards against: voices/peter1/ added to the repo
+    after Drive's voices/ already existed must still reach Drive on the
+    next mount, not be silently skipped because voices/ already exists."""
+    repo_dir = tmp_path / "repo"
+    (repo_dir / "voices" / "narrator").mkdir(parents=True)
+    (repo_dir / "voices" / "narrator" / "profile.yaml").write_text("engine: dummy\n")
+    (repo_dir / "voices" / "peter1").mkdir(parents=True)
+    (repo_dir / "voices" / "peter1" / "profile.yaml").write_text("engine: gpt-sovits\n")
+
+    project_dir = tmp_path / "drive_project"
+    existing = project_dir / "voices" / "narrator"
+    existing.mkdir(parents=True)
+    (existing / "profile.yaml").write_text("engine: dummy  # already on drive\n")
+
+    _seed_drive_project_dir(project_dir, repo_dir)
+
+    assert "already on drive" in (project_dir / "voices" / "narrator" / "profile.yaml").read_text()
+    assert (project_dir / "voices" / "peter1" / "profile.yaml").is_file()
 
 
 def test_seed_skips_missing_sources_without_raising(tmp_path):
@@ -73,7 +96,6 @@ def test_seed_skips_missing_sources_without_raising(tmp_path):
     project_dir.mkdir()
 
     _seed_drive_project_dir(project_dir, repo_dir)  # must not raise
-    assert not (project_dir / "voices").exists()
 
 
 def test_fetch_model_gpt_sovits_skips_present_sources(tmp_path, monkeypatch):
