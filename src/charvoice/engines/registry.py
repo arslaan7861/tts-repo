@@ -58,6 +58,11 @@ def _load_builtin_engines() -> None:
     except ImportError:
         pass
 
+    try:
+        import charvoice.engines.f5_tts  # noqa: F401
+    except ImportError:
+        pass
+
 
 def available_engines() -> list[str]:
     """Names of every registered engine."""

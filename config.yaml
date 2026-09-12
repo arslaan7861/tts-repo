@@ -8,10 +8,13 @@ project:
   name: character-voice-generator
 
 tts:
-  default_engine: gpt-sovits
+  default_engine: f5-tts
 
   engines:
     dummy: {}
+
+    f5-tts:
+      model_dir: models/f5-tts
 
     gpt-sovits:
       model_dir: models/gpt-sovits

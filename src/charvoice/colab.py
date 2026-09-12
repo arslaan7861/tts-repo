@@ -299,6 +299,15 @@ def _filtered_requirements(requirements_file: Path) -> Path:
     return filtered_path
 
 
+
+def _fetch_f5_tts(model_dir: Path) -> None:
+    try:
+        import f5_tts
+        print("fetch_model(): f5-tts package already installed.")
+    except ImportError:
+        print("fetch_model(): Installing f5-tts...")
+        _run([sys.executable, "-m", "pip", "install", "f5-tts"])
+
 def _fetch_gpt_sovits(model_dir: Path) -> None:
     """Clone GPT-SoVITS, install its own Python deps, and pull v2 weights.
 
@@ -370,6 +379,10 @@ def fetch_model(engine: str, engine_config: EngineConfig) -> Path | None:
         return None
 
     model_dir = Path(engine_config.model_dir).expanduser().resolve()
+
+    if engine == "f5-tts":
+        _fetch_f5_tts(model_dir)
+        return model_dir
 
     if engine == "gpt-sovits":
         _fetch_gpt_sovits(model_dir)
