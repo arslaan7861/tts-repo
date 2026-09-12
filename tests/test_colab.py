@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+
+import pytest
 
 import charvoice.colab as colab_module
 from charvoice.colab import (
     _GPT_SOVITS_PACKAGE_MARKER,
     _GPT_SOVITS_WEIGHTS_MARKER,
+    _run,
     _seed_drive_project_dir,
     fetch_model,
     in_colab,
@@ -17,6 +21,25 @@ from charvoice.config import EngineConfig
 
 def test_in_colab_false_locally():
     assert in_colab() is False
+
+
+def test_run_succeeds_and_prints_output(capsys):
+    result = _run(["python3", "-c", "print('hello from subprocess')"])
+    assert result.returncode == 0
+    assert "hello from subprocess" in capsys.readouterr().out
+
+
+def test_run_failure_carries_stderr_in_the_raised_error(capsys):
+    """The actual bug: plain subprocess.run(check=True) raised a
+    CalledProcessError with no captured output, so a failing pip/git command
+    showed only an exit code in the traceback -- never the real reason."""
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _run(["python3", "-c", "import sys; sys.stderr.write('boom'); sys.exit(1)"])
+
+    assert exc_info.value.returncode == 1
+    assert "boom" in exc_info.value.stderr
+    # also printed live to stdout, not just attached to the exception
+    assert "boom" in capsys.readouterr().out
 
 
 def test_mount_drive_returns_none_outside_colab():

@@ -36,8 +36,28 @@ def in_colab() -> bool:
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run `cmd`, printing its output live and raising with that output
+    attached on failure.
+
+    Plain `subprocess.run(cmd, check=True)` sends stdout/stderr to the
+    notebook's output stream directly, but the CalledProcessError it raises
+    on failure carries neither -- so a failure here showed only
+    "exit status 1" with no way to see *why* it failed. Capturing and
+    re-printing keeps the live-output behavior while also attaching the
+    captured text to the raised error, so Colab's traceback shows the actual
+    pip/git error instead of just the exit code.
+    """
     print(f"$ {' '.join(cmd)}")
-    return subprocess.run(cmd, check=True, **kwargs)
+    result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, output=result.stdout, stderr=result.stderr
+        )
+    return result
 
 
 def setup_colab_environment(
@@ -224,7 +244,11 @@ def _fetch_gpt_sovits(model_dir: Path) -> None:
         # was cloned in an earlier run before this step existed (or was
         # interrupted partway through).
         print("fetch_model(): installing GPT-SoVITS's own Python dependencies ...")
-        _run([sys.executable, "-m", "pip", "install", "-r", str(requirements_file), "-q"])
+        # No -q here deliberately: this install is the most likely to fail
+        # (GPT-SoVITS's requirements.txt pulls in build-from-source packages
+        # like pyopenjtalk/ctranslate2), and full pip output is what makes a
+        # failure here diagnosable instead of a bare exit code.
+        _run([sys.executable, "-m", "pip", "install", "-r", str(requirements_file)])
 
     if (model_dir / _GPT_SOVITS_WEIGHTS_MARKER).is_file():
         print(f"fetch_model(): pretrained v2 weights already present under {model_dir}.")
