@@ -88,16 +88,16 @@ class GPTSoVITSEngine(Engine):
                 "(see this module's docstring for the expected layout)."
             )
 
-        model_dir = Path(engine_config.model_dir).expanduser()
+        model_dir = Path(engine_config.model_dir).expanduser().resolve()
         if not model_dir.is_dir():
             raise ModelNotFoundError(f"gpt-sovits model_dir does not exist: {model_dir}")
 
         extra = engine_config.extra
         paths = {
-            "t2s_weights_path": model_dir / extra.get("t2s_weights", _DEFAULT_T2S_WEIGHTS),
-            "vits_weights_path": model_dir / extra.get("vits_weights", _DEFAULT_VITS_WEIGHTS),
-            "bert_base_path": model_dir / extra.get("bert_dir", _DEFAULT_BERT_DIR),
-            "cnhuhbert_base_path": model_dir / extra.get("cnhuhbert_dir", _DEFAULT_CNHUBERT_DIR),
+            "t2s_weights_path": (model_dir / extra.get("t2s_weights", _DEFAULT_T2S_WEIGHTS)).resolve(),
+            "vits_weights_path": (model_dir / extra.get("vits_weights", _DEFAULT_VITS_WEIGHTS)).resolve(),
+            "bert_base_path": (model_dir / extra.get("bert_dir", _DEFAULT_BERT_DIR)).resolve(),
+            "cnhuhbert_base_path": (model_dir / extra.get("cnhuhbert_dir", _DEFAULT_CNHUBERT_DIR)).resolve(),
         }
         missing = [str(p) for p in paths.values() if not p.exists()]
         if missing:
@@ -131,7 +131,7 @@ class GPTSoVITSEngine(Engine):
         # GPT-SoVITS's own package expects os.getcwd() to be its repo root at import time
         # (e.g. `now_dir = os.getcwd()` in TTS.py, `sys.path.append(f"{os.getcwd()}/...")` in sv.py).
         # We temporarily change cwd so its module-level path variables capture the correct location.
-        model_dir = Path(engine_config.model_dir).expanduser()
+        model_dir = Path(engine_config.model_dir).expanduser().resolve()
         old_cwd = os.getcwd()
         os.chdir(model_dir)
         try:

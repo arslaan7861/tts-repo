@@ -369,7 +369,7 @@ def fetch_model(engine: str, engine_config: EngineConfig) -> Path | None:
         print(f"fetch_model(): engine {engine!r} has no model_dir configured, nothing to fetch.")
         return None
 
-    model_dir = Path(engine_config.model_dir).expanduser()
+    model_dir = Path(engine_config.model_dir).expanduser().resolve()
 
     if engine == "gpt-sovits":
         _fetch_gpt_sovits(model_dir)
