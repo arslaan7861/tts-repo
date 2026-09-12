@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Generated output and caches -- keep the directories (.gitkeep), not their contents.
+output/*
+!output/.gitkeep
+tmp/*
+!tmp/.gitkeep
+models/*
+!models/.gitkeep
+
+# Large model checkpoints never belong in git.
+*.ckpt
+*.pth
+*.safetensors

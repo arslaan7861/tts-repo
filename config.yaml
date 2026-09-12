@@ -1,0 +1,34 @@
+# charvoice configuration. See requirements.md for the full field reference.
+#
+# Paths below are relative to the project directory: the local checkout when
+# running locally, or the mounted Google Drive folder once mount_drive() has
+# been called in the notebook. Never hard-code an absolute path here.
+
+project:
+  name: character-voice-generator
+
+tts:
+  default_engine: dummy # switch to gpt-sovits once a model is installed
+
+  engines:
+    dummy: {}
+
+    gpt-sovits:
+      model_dir: models/gpt-sovits
+
+audio:
+  output_format: wav
+  sample_rate: 48000
+  channels: 1
+  bit_depth: 16
+  pause_between_lines_ms: 250
+  pause_between_scenes_ms: 800
+  peak_dbfs: -1.0
+
+paths:
+  voices: voices
+  models: models
+  scripts: scripts
+  output: output
+  temp: tmp
+  cache: tmp/cache

@@ -1,0 +1,8 @@
+engine: dummy
+language: en
+speed: 1.0
+
+# To clone a real voice with gpt-sovits instead:
+# engine: gpt-sovits
+# reference_audio: reference.wav       # resolved relative to this file's directory
+# reference_text: "Transcript of the reference clip, word for word."

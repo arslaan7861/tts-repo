@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "charvoice"
+version = "0.1.0"
+description = "Multi-character voiceover generator: one script in, one combined WAV out."
+readme = "README.md"
+requires-python = ">=3.10"
+
+# Core dependencies are deliberately tiny and CPU-safe. Installing this package
+# locally must never pull a CUDA wheel -- see requirements.md section 2.
+dependencies = [
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+# Installed only inside Colab, where CUDA torch is already present.
+colab = [
+    "torch",
+    "torchaudio",
+    "librosa",
+    "soxr",
+]
+# Optional high-quality resampling and loudness normalisation. The package
+# works without these; audio.py falls back to a numpy resampler.
+audio = [
+    "soxr",
+    "pyloudnorm",
+]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+charvoice = "charvoice.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/charvoice"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
