@@ -141,17 +141,18 @@ def test_fetch_model_gpt_sovits_skips_present_sources(tmp_path, monkeypatch):
     assert calls == []  # nothing needed fetching, so no subprocess ran
 
 
-def test_filtered_requirements_drops_skipped_packages(tmp_path):
+def test_filtered_requirements_drops_skipped_packages(tmp_path, monkeypatch):
     """opencc (forced to build from source by --no-binary=opencc) and
     python_mecab_ko (needs the system mecab-ko library) both fail to build
     on a stock Colab runtime and are only needed for zh/ko, which charvoice's
-    gpt-sovits adapter never uses. numpy<2.0 force-downgrades Colab's
-    preinstalled numpy, which then breaks transformers' own Hubert import
-    (StringDType is numpy-2.0+-only). See _GPT_SOVITS_SKIP_REQUIREMENTS."""
+    gpt-sovits adapter never uses. See _GPT_SOVITS_SKIP_REQUIREMENTS."""
+    # Pinned separately (see _PIN_TO_INSTALLED); stubbed to None here so this
+    # test covers only the skip behavior, independent of the environment.
+    monkeypatch.setattr(colab_module, "_installed_version", lambda package: None)
+
     src = tmp_path / "requirements.txt"
     src.write_text(
         "--no-binary=opencc\n"
-        "numpy<2.0\n"
         "librosa==0.10.2\n"
         "opencc\n"
         "python_mecab_ko; sys_platform != 'win32'\n"
@@ -172,7 +173,7 @@ def test_filtered_requirements_pins_transformers(tmp_path):
     documented upstream issue (RVC-Boss/GPT-SoVITS#2687) whose own fix is
     pinning exactly 4.49.0."""
     src = tmp_path / "requirements.txt"
-    src.write_text("numpy<2.0\ntransformers<5,>=4.51\nx_transformers\n")
+    src.write_text("transformers<5,>=4.51\nx_transformers\n")
 
     filtered = colab_module._filtered_requirements(src)
 
@@ -182,6 +183,44 @@ def test_filtered_requirements_pins_transformers(tmp_path):
     # x_transformers is a different package -- must not be mistaken for a
     # transformers line and rewritten
     assert "x_transformers" in kept
+
+
+def test_filtered_requirements_pins_numpy_numba_scipy_to_installed(tmp_path, monkeypatch):
+    """numpy/numba/scipy ship compiled extensions whose ABI compatibility
+    isn't captured by declared version ranges -- letting pip re-resolve any
+    of them (e.g. to satisfy requirements.txt's own `numpy<2.0`) can
+    silently downgrade numpy while an already-installed numba/scipy stays
+    linked against the newer ABI it was actually built with, surfacing as
+    'numpy.dtype size changed, may indicate binary incompatibility' deep
+    inside an unrelated import. Pinning all three to whatever's already
+    installed is the only way to guarantee this install never touches them."""
+
+    def fake_installed_version(package):
+        return {"numpy": "2.5.3", "numba": "0.61.2", "scipy": "1.16.3"}.get(package)
+
+    monkeypatch.setattr(colab_module, "_installed_version", fake_installed_version)
+
+    src = tmp_path / "requirements.txt"
+    src.write_text("numpy<2.0\nscipy\nnumba\nlibrosa==0.10.2\n")
+
+    filtered = colab_module._filtered_requirements(src)
+
+    kept = filtered.read_text().splitlines()
+    assert kept == ["numpy==2.5.3", "scipy==1.16.3", "numba==0.61.2", "librosa==0.10.2"]
+
+
+def test_filtered_requirements_leaves_uninstalled_pin_targets_alone(tmp_path, monkeypatch):
+    """If numpy/numba/scipy aren't installed at all (e.g. local dev without
+    the colab extra), the original line passes through unpinned rather than
+    being rewritten to a nonsense 'package==None'."""
+    monkeypatch.setattr(colab_module, "_installed_version", lambda package: None)
+
+    src = tmp_path / "requirements.txt"
+    src.write_text("numpy<2.0\nscipy\n")
+
+    filtered = colab_module._filtered_requirements(src)
+
+    assert filtered.read_text().splitlines() == ["numpy<2.0", "scipy"]
 
 
 def test_fetch_model_gpt_sovits_installs_filtered_requirements(tmp_path, monkeypatch):

@@ -231,7 +231,7 @@ def _download(url: str, dest: Path) -> None:
 #     transformers-internal lazy import checks for). Dropping this line lets
 #     pip keep whatever numpy Colab already has, which is what was already
 #     working before this install touched anything.
-_GPT_SOVITS_SKIP_REQUIREMENTS = ("opencc", "python_mecab_ko", "numpy<2.0")
+_GPT_SOVITS_SKIP_REQUIREMENTS = ("opencc", "python_mecab_ko")
 
 # requirements.txt's own range (`transformers<5,>=4.51`) resolves to a
 # version newer than GPT-SoVITS actually works with: feature_extractor/
@@ -242,28 +242,58 @@ _GPT_SOVITS_SKIP_REQUIREMENTS = ("opencc", "python_mecab_ko", "numpy<2.0")
 # That issue's own fix is exactly this pin.
 _GPT_SOVITS_PIN_REQUIREMENTS = {"transformers": "transformers==4.49.0"}
 
+# numpy/numba/scipy ship compiled C extensions built against a specific
+# numpy ABI. Their declared version ranges (numba's numpy>=1.24, say) don't
+# capture ABI compatibility, only API version -- so letting pip re-resolve
+# any of them here can silently downgrade numpy to satisfy some other
+# package's older declared range while numba/scipy's ALREADY-INSTALLED
+# compiled .so stays linked against Colab's newer numpy ABI (pip sees them
+# as "already satisfied" and skips reinstalling). That mismatch surfaces
+# deep inside an unrelated import as "numpy.dtype size changed, may
+# indicate binary incompatibility" -- exactly the numpy<2.0 line we already
+# skip, just via a transitive path instead of requirements.txt's direct one.
+# Pinning all three to whatever Colab already has, captured before this
+# install runs, is the only way to guarantee the install never touches them
+# at all, regardless of what any of the other ~40 lines declares.
+_PIN_TO_INSTALLED = ("numpy", "numba", "scipy")
+
+
+def _installed_version(package: str) -> str | None:
+    """The installed version of `package`, or None if it isn't installed."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version(package)
+    except PackageNotFoundError:
+        return None
+
 
 def _filtered_requirements(requirements_file: Path) -> Path:
     """Copy `requirements_file` with `_GPT_SOVITS_SKIP_REQUIREMENTS` lines
-    removed and `_GPT_SOVITS_PIN_REQUIREMENTS` lines rewritten to an exact
-    known-working version, so `pip install -r` never attempts an opencc/
-    python_mecab_ko build and never resolves transformers to a version that
-    breaks GPT-SoVITS's own imports. Skip-matching catches both a plain
-    requirement line (`opencc`) and a pip directive targeting it
+    removed and version-sensitive lines rewritten, so `pip install -r` never
+    attempts an opencc/python_mecab_ko build, never resolves transformers to
+    a version that breaks GPT-SoVITS's own imports, and never lets numpy/
+    numba/scipy drift from whatever Colab already has installed (their
+    compiled extensions are ABI-sensitive in a way plain version ranges
+    don't capture -- see `_PIN_TO_INSTALLED`). Skip-matching catches both a
+    plain requirement line (`opencc`) and a pip directive targeting it
     (`--no-binary=opencc`, which GPT-SoVITS's requirements.txt uses to force
     a source build of opencc specifically -- the thing we're avoiding).
     Returns the path to the filtered copy, written alongside the original.
     """
+    pins = dict(_GPT_SOVITS_PIN_REQUIREMENTS)
+    for package in _PIN_TO_INSTALLED:
+        installed = _installed_version(package)
+        if installed:
+            pins[package] = f"{package}=={installed}"
+
     filtered_path = requirements_file.with_name("requirements.charvoice-filtered.txt")
     kept: list[str] = []
     for line in requirements_file.read_text().splitlines():
         normalized = line.strip().lower()
         if any(name in normalized for name in _GPT_SOVITS_SKIP_REQUIREMENTS):
             continue
-        pin = next(
-            (p for name, p in _GPT_SOVITS_PIN_REQUIREMENTS.items() if normalized.startswith(name)),
-            None,
-        )
+        pin = next((p for name, p in pins.items() if normalized.startswith(name)), None)
         kept.append(pin if pin else line)
     filtered_path.write_text("\n".join(kept) + "\n")
     return filtered_path
