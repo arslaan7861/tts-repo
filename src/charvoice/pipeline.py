@@ -86,7 +86,7 @@ def validate_script(
                             kind="missing_profile_field",
                             message=(
                                 f'Voice profile "{speaker_id}" is missing field(s) required '
-                                f'by engine "{profile.engine}": {", ".join(missing)}.'
+                                f'by the generation engine: {", ".join(missing)}.'
                             ),
                             speaker=speaker_id,
                             hint=f"Edit: voices/{speaker_id}/profile.yaml",
