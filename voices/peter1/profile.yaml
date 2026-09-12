@@ -1,0 +1,5 @@
+engine: gpt-sovits
+reference_audio: reference.wav
+reference_text: "Five come to mind, but the one that scares me most isn't even the strongest."
+language: en
+speed: 1.0

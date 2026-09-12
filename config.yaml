@@ -8,7 +8,7 @@ project:
   name: character-voice-generator
 
 tts:
-  default_engine: dummy # switch to gpt-sovits once a model is installed
+  default_engine: gpt-sovits
 
   engines:
     dummy: {}

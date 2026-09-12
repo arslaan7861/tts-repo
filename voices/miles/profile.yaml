@@ -1,3 +1,5 @@
-engine: dummy
+engine: gpt-sovits
+reference_audio: reference.wav
+reference_text: "Pete, out of every villain in every universe, which five actually scare you?"
 language: en
 speed: 1.0
