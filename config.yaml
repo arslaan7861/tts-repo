@@ -15,6 +15,11 @@ tts:
 
     gpt-sovits:
       model_dir: models/gpt-sovits
+      # Defaults target the v2 pretrained base model (few-shot cloning, no
+      # training needed). Override to use a different version/checkpoint:
+      # version: v2
+      # t2s_weights: gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt
+      # vits_weights: gsv-v2final-pretrained/s2G2333k.pth
 
 audio:
   output_format: wav

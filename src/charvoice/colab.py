@@ -131,20 +131,70 @@ def mount_drive(
     return project_dir
 
 
+_GPT_SOVITS_REPO_URL = "https://github.com/RVC-Boss/GPT-SoVITS.git"
+_GPT_SOVITS_WEIGHTS_URL = "https://huggingface.co/lj1995/GPT-SoVITS"
+# Marker files checked per source before (re-)fetching it, so a re-run of
+# this cell is a no-op once both are present -- cheap existence checks, no
+# hashing, matching requirements.md section 2's "no repeated downloads" rule.
+_GPT_SOVITS_PACKAGE_MARKER = "GPT_SoVITS/TTS_infer_pack/TTS.py"
+_GPT_SOVITS_WEIGHTS_MARKER = "gsv-v2final-pretrained/s2G2333k.pth"
+
+
+def _fetch_gpt_sovits(model_dir: Path) -> None:
+    """Clone the GPT-SoVITS repo (for its Python package) and pull v2 weights.
+
+    Two independent sources land in the same `model_dir`: the upstream repo
+    (needed on sys.path for `from GPT_SoVITS.TTS_infer_pack.TTS import TTS`)
+    and the pretrained checkpoints from HuggingFace (too large to vendor into
+    this repo, per requirements.md section 14's "don't hard-code model paths"
+    and section 18's model-size guidance). Each is skipped independently if
+    already present, so interrupting one doesn't force re-fetching the other.
+    """
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    if (model_dir / _GPT_SOVITS_PACKAGE_MARKER).is_file():
+        print(f"fetch_model(): GPT-SoVITS package already present under {model_dir}.")
+    else:
+        print(f"fetch_model(): cloning GPT-SoVITS into {model_dir} ...")
+        _run(["git", "clone", "--depth", "1", _GPT_SOVITS_REPO_URL, str(model_dir)])
+
+    if (model_dir / _GPT_SOVITS_WEIGHTS_MARKER).is_file():
+        print(f"fetch_model(): pretrained v2 weights already present under {model_dir}.")
+    else:
+        print(f"fetch_model(): cloning pretrained weights into {model_dir} ...")
+        # The HuggingFace repo is itself a git repo (with git-lfs for the
+        # large checkpoint files); clone it directly rather than adding a
+        # huggingface_hub dependency for a single one-time download.
+        _run(["git", "lfs", "install", "--skip-repo"])
+        _run(["git", "clone", _GPT_SOVITS_WEIGHTS_URL, str(model_dir / "_weights_tmp")])
+        weights_tmp = model_dir / "_weights_tmp"
+        for child in weights_tmp.iterdir():
+            if child.name == ".git":
+                continue
+            child.rename(model_dir / child.name)
+        shutil.rmtree(weights_tmp, ignore_errors=True)
+
+    if str(model_dir) not in sys.path:
+        sys.path.insert(0, str(model_dir))
+
+
 def fetch_model(engine: str, engine_config: EngineConfig) -> Path | None:
     """Ensure the engine's model files are present, downloading if needed.
 
-    Currently a structural hook: real per-engine download logic (cloning
-    GPT-SoVITS, pulling checkpoints) belongs here once an engine needs it.
-    Re-running this cell must be a no-op when the model is already present
-    (requirements.md section 2) -- checked via `model_dir` already existing
-    and non-empty.
+    Re-running this cell is a no-op once the model is present -- checked via
+    cheap marker-file existence, not by re-downloading and diffing
+    (requirements.md section 2, section 19).
     """
     if not engine_config.model_dir:
         print(f"fetch_model(): engine {engine!r} has no model_dir configured, nothing to fetch.")
         return None
 
     model_dir = Path(engine_config.model_dir).expanduser()
+
+    if engine == "gpt-sovits":
+        _fetch_gpt_sovits(model_dir)
+        return model_dir
+
     if model_dir.is_dir() and any(model_dir.iterdir()):
         print(f"fetch_model(): {model_dir} already populated, skipping.")
         return model_dir

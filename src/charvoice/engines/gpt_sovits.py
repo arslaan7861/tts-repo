@@ -1,18 +1,32 @@
 """GPT-SoVITS adapter -- the primary voice engine (requirements.md section 2).
 
-This adapter expects a working GPT-SoVITS checkout/installation under the
-configured `model_dir` (see requirements.md section 14 for model-management
-conventions). It is structurally complete -- registration, config
-resolution, the batching-by-speaker path, checkpoint-aware cache
-fingerprinting -- but the actual inference calls are UNVERIFIED without a
-GPU: this module is exercised locally only by a smoke test (registration and
-pure-Python helpers), never real inference, until it is run on Colab.
+Drives the real upstream `TTS` class from
+https://github.com/RVC-Boss/GPT-SoVITS (GPT_SoVITS/TTS_infer_pack/TTS.py) in
+process, rather than shelling out to its HTTP server (api_v2.py) -- an
+in-process call avoids a second process to manage and lets `unload()` free
+GPU memory directly.
+
+Model files (v2 pretrained base, few-shot voice cloning, no training
+required) come from https://huggingface.co/lj1995/GPT-SoVITS:
+
+    model_dir/
+    ├── gsv-v2final-pretrained/
+    │   ├── s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt   (t2s / GPT weights)
+    │   └── s2G2333k.pth                                       (vits / SoVITS weights)
+    ├── chinese-hubert-base/      (cnhuhbert_base_path, despite the name -- it's
+    │                              the feature extractor TTS.py always loads)
+    └── chinese-roberta-wwm-ext-large/   (bert_base_path)
+
+This adapter is structurally complete and calls the real inference API, but
+is UNVERIFIED without a GPU -- exercised locally only by a smoke test
+(registration, checkpoint resolution, fingerprinting), never real inference,
+until it is run on Colab.
 
 Hard rule (requirements.md section 2): this module must be importable on a
-machine with no torch and no GPU. `torch` (and anything that transitively
-imports it, e.g. the actual GPT-SoVITS inference code) is imported only
-inside method bodies that are actually invoked when this engine is used --
-never at module scope. No network calls happen at import time either.
+machine with no torch and no GPU. `torch` and the GPT-SoVITS package itself
+are imported only inside method bodies that are actually invoked when this
+engine is used -- never at module scope. No network calls happen at import
+time either.
 """
 
 from __future__ import annotations
@@ -28,55 +42,81 @@ from charvoice.engines.registry import register
 from charvoice.errors import GenerationError, GPUUnavailableError, ModelNotFoundError
 from charvoice.profiles import VoiceProfile
 
-# Checkpoint files we expect to find under model_dir once it holds a real
-# GPT-SoVITS install. Exact names follow the upstream repo's convention.
-_EXPECTED_CHECKPOINTS = ("gpt.ckpt", "sovits.pth")
+# Filenames inside model_dir, from the v2 pretrained release on HuggingFace
+# (lj1995/GPT-SoVITS). Override any of these via tts.engines["gpt-sovits"].extra
+# if you use a different version (v3/v4/v2Pro) or a fine-tuned checkpoint.
+_DEFAULT_T2S_WEIGHTS = "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt"
+_DEFAULT_VITS_WEIGHTS = "gsv-v2final-pretrained/s2G2333k.pth"
+_DEFAULT_BERT_DIR = "chinese-roberta-wwm-ext-large"
+_DEFAULT_CNHUBERT_DIR = "chinese-hubert-base"
+_DEFAULT_VERSION = "v2"
+
+# text_lang/prompt_lang values the v2 text cleaner accepts
+# (GPT_SoVITS/text/cleaner.py's language_module_map).
+_SUPPORTED_LANGUAGES = {"zh", "ja", "en", "ko", "yue"}
 
 
 @register("gpt-sovits")
 class GPTSoVITSEngine(Engine):
     """Adapter for the GPT-SoVITS voice-cloning TTS model.
 
-    One instance = one loaded checkpoint, per the base `Engine` contract.
-    `engine_state` on each `SpeakerHandle` holds the per-character reference
-    features extracted once in `prepare_speaker`.
+    One instance = one loaded `TTS` object, per the base `Engine` contract.
+    `engine_state` on each `SpeakerHandle` holds that character's reference
+    audio path/text -- GPT-SoVITS re-encodes the reference per request
+    rather than exposing a separate "extract once" step, so there is nothing
+    heavier to cache here; the one-time cost this still avoids is re-loading
+    the GPT/SoVITS checkpoints, which `load()` does once per engine instance.
     """
 
     def __init__(self) -> None:
+        self._tts: Any = None
         self._model_dir: Path | None = None
-        self._model: Any = None
-        self._device: Any = None
 
     def required_profile_fields(self) -> set[str]:
         return {"reference_audio", "reference_text"}
 
-    def _resolve_checkpoints(self, engine_config: EngineConfig) -> Path:
-        """Validate model_dir and checkpoint files exist; return the resolved dir."""
+    def _checkpoint_paths(self, engine_config: EngineConfig) -> dict[str, Path]:
+        """Resolve every required checkpoint/model path under model_dir.
+
+        Individual filenames can be overridden via `extra` for a different
+        GPT-SoVITS version or a fine-tuned checkpoint.
+        """
         if not engine_config.model_dir:
             raise ModelNotFoundError(
                 'gpt-sovits requires tts.engines["gpt-sovits"].model_dir to be set '
-                "to a directory containing the GPT-SoVITS checkpoints."
+                "to a directory holding the GPT-SoVITS pretrained models "
+                "(see this module's docstring for the expected layout)."
             )
 
         model_dir = Path(engine_config.model_dir).expanduser()
         if not model_dir.is_dir():
             raise ModelNotFoundError(f"gpt-sovits model_dir does not exist: {model_dir}")
 
-        missing = [name for name in _EXPECTED_CHECKPOINTS if not (model_dir / name).is_file()]
+        extra = engine_config.extra
+        paths = {
+            "t2s_weights_path": model_dir / extra.get("t2s_weights", _DEFAULT_T2S_WEIGHTS),
+            "vits_weights_path": model_dir / extra.get("vits_weights", _DEFAULT_VITS_WEIGHTS),
+            "bert_base_path": model_dir / extra.get("bert_dir", _DEFAULT_BERT_DIR),
+            "cnhuhbert_base_path": model_dir / extra.get("cnhuhbert_dir", _DEFAULT_CNHUBERT_DIR),
+        }
+        missing = [str(p) for p in paths.values() if not p.exists()]
         if missing:
             raise ModelNotFoundError(
-                f"gpt-sovits model_dir {model_dir} is missing checkpoint file(s): "
-                f"{', '.join(missing)}"
+                f"gpt-sovits model_dir {model_dir} is missing expected file(s):\n  "
+                + "\n  ".join(missing)
+                + "\nDownload the pretrained models from "
+                "https://huggingface.co/lj1995/GPT-SoVITS into model_dir."
             )
-        return model_dir
+        return paths
 
     def load(self, engine_config: EngineConfig) -> None:
-        """Resolve + validate the checkpoint directory, then load weights onto the GPU.
+        """Resolve checkpoints and construct the upstream `TTS` object.
 
-        Lazy torch import: this is the only place in the module that touches
-        torch, and only when an actual gpt-sovits engine is being loaded.
+        Lazy imports: this is the only method that imports torch or the
+        GPT-SoVITS package, and only when an actual gpt-sovits engine is
+        being loaded -- see module docstring.
         """
-        model_dir = self._resolve_checkpoints(engine_config)
+        paths = self._checkpoint_paths(engine_config)
 
         import torch  # noqa: PLC0415 -- deliberately lazy, see module docstring
 
@@ -86,70 +126,97 @@ class GPTSoVITSEngine(Engine):
                 "Run this on a Colab GPU runtime."
             )
 
-        self._model_dir = model_dir
-        self._device = torch.device("cuda")
-        # Real checkpoint loading (GPT + SoVITS weights, vocoder, etc.) goes
-        # here once this is run against an actual GPT-SoVITS checkout.
-        self._model = None
+        # GPT-SoVITS's own package, expected on sys.path because model_dir's
+        # repo root (the GPT-SoVITS checkout, not just its weights) was
+        # installed/cloned per requirements.md section 14.
+        from GPT_SoVITS.TTS_infer_pack.TTS import TTS  # noqa: PLC0415
+
+        version = engine_config.extra.get("version", _DEFAULT_VERSION)
+        config = {
+            "device": "cuda",
+            "is_half": bool(engine_config.extra.get("is_half", True)),
+            "version": version,
+            "t2s_weights_path": str(paths["t2s_weights_path"]),
+            "vits_weights_path": str(paths["vits_weights_path"]),
+            "bert_base_path": str(paths["bert_base_path"]),
+            "cnhuhbert_base_path": str(paths["cnhuhbert_base_path"]),
+        }
+
+        self._tts = TTS(config)
+        self._model_dir = Path(engine_config.model_dir).expanduser()  # type: ignore[arg-type]
 
     def prepare_speaker(self, profile: VoiceProfile) -> SpeakerHandle:
-        """Extract and cache reference-audio features for one character.
+        """Validate and stash this character's reference audio/text/language.
 
-        Done once per character (requirements.md section 19), not once per
-        line -- the extracted features are stashed in `engine_state` and
-        reused by every subsequent generate call for this speaker.
+        GPT-SoVITS takes the reference per `run()` call rather than exposing
+        a separate "encode once" step, so there is no heavier setup to do
+        here -- this just fails early (before any generation) if a profile
+        names a language the loaded version doesn't support.
         """
-        # Real implementation would run the GPT-SoVITS reference encoder on
-        # profile.reference_audio/profile.reference_text here and stash the
-        # resulting tensors/features as engine_state.
+        language = profile.language or "en"
+        if language not in _SUPPORTED_LANGUAGES:
+            supported = ", ".join(sorted(_SUPPORTED_LANGUAGES))
+            raise GenerationError(
+                f'Voice profile "{profile.id}" has language "{language}", which '
+                f"gpt-sovits does not support. Supported: {supported}."
+            )
+
         engine_state = {
-            "reference_audio": profile.reference_audio,
+            "reference_audio": str(profile.reference_audio),
             "reference_text": profile.reference_text,
+            "language": language,
         }
         return SpeakerHandle(profile=profile, engine_state=engine_state)
 
-    def generate_batch(self, texts: list[str], speaker: SpeakerHandle) -> list[AudioSegment]:
-        """Synthesize multiple same-speaker lines in one forward pass.
+    def generate_one(self, text: str, speaker: SpeakerHandle) -> AudioSegment:
+        """Synthesize exactly one line via the loaded TTS object.
 
-        GPT-SoVITS can batch multiple lines against a single cached reference
-        (speaker.engine_state) more cheaply than calling generate_one in a
-        loop -- this is the override requirements.md section 19 asks for.
+        `generate_batch` is not overridden: GPT-SoVITS's own `run()` already
+        takes one `text` per call (its `batch_size` parameter governs
+        internal sentence-splitting, not multiple unrelated lines at once),
+        so the base class's loop is the correct, not merely default,
+        implementation here.
         """
-        if self._model_dir is None:
+        if self._tts is None:
             raise GenerationError("gpt-sovits engine.load() must be called before generation.")
 
-        # Real implementation would batch `texts` through the loaded model
-        # against speaker.engine_state in a single forward pass.
-        return [self._synthesize_line(text, speaker) for text in texts]
+        import numpy as np  # noqa: PLC0415
 
-    def generate_one(self, text: str, speaker: SpeakerHandle) -> AudioSegment:
-        """Single-line fallback; routes through the batched path."""
-        return self.generate_batch([text], speaker)[0]
+        state = speaker.engine_state
+        request = {
+            "text": text,
+            "text_lang": state["language"],
+            "ref_audio_path": state["reference_audio"],
+            "prompt_text": state["reference_text"],
+            "prompt_lang": state["language"],
+            "speed_factor": speaker.profile.speed or 1.0,
+        }
 
-    def _synthesize_line(self, text: str, speaker: SpeakerHandle) -> AudioSegment:
-        """Placeholder for the actual per-line inference call.
+        try:
+            last_sample_rate, last_chunk = None, None
+            for sample_rate, chunk in self._tts.run(request):
+                last_sample_rate, last_chunk = sample_rate, chunk
+        except Exception as exc:  # noqa: BLE001 -- surface any engine failure uniformly
+            raise GenerationError(
+                f'gpt-sovits failed synthesizing line for "{speaker.profile.id}": {exc}'
+            ) from exc
 
-        Unverified without a GPU -- see module docstring. Raising here (rather
-        than faking audio) keeps this path honest: calling it without a real
-        model loaded is a bug, not a silently-wrong result.
-        """
-        raise GenerationError(
-            "GPTSoVITSEngine inference is not yet implemented against a real "
-            "GPT-SoVITS checkout. This adapter is structurally complete but "
-            "unverified until run on a GPU (Colab)."
-        )
+        if last_chunk is None:
+            raise GenerationError(f'gpt-sovits produced no audio for "{speaker.profile.id}".')
+
+        # TTS.run() yields int16 PCM; AudioSegment's convention is float32 in [-1, 1].
+        samples = last_chunk.astype(np.float32) / 32768.0
+        return AudioSegment(samples=samples, sample_rate=last_sample_rate)
 
     def unload(self) -> None:
         """Free GPU memory. Safe to call even if load() was never called."""
-        self._model = None
-        if self._device is not None:
-            try:
-                import torch  # noqa: PLC0415
+        self._tts = None
+        try:
+            import torch  # noqa: PLC0415
 
-                torch.cuda.empty_cache()
-            except ImportError:
-                pass
-        self._device = None
+            torch.cuda.empty_cache()
+        except ImportError:
+            pass
 
     def model_fingerprint(self, engine_config: EngineConfig) -> str:
         """Fingerprint including checkpoint file content where resolvable.
@@ -158,21 +225,20 @@ class GPTSoVITSEngine(Engine):
         doesn't resolve yet -- e.g. before the files have been downloaded --
         so callers can still probe a cache key without raising.
         """
-        if not engine_config.model_dir:
+        try:
+            paths = self._checkpoint_paths(engine_config)
+        except ModelNotFoundError:
             return super().model_fingerprint(engine_config)
 
-        model_dir = Path(engine_config.model_dir).expanduser()
-        if not model_dir.is_dir():
-            return super().model_fingerprint(engine_config)
-
-        parts = [engine_config.name, str(model_dir)]
-        for name in _EXPECTED_CHECKPOINTS:
-            ckpt = model_dir / name
-            if ckpt.is_file():
-                stat = ckpt.stat()
+        parts = [engine_config.name, engine_config.extra.get("version", _DEFAULT_VERSION)]
+        for name, path in sorted(paths.items()):
+            if path.is_file():
+                stat = path.stat()
                 parts.append(f"{name}:{stat.st_size}:{stat.st_mtime_ns}")
             else:
-                parts.append(f"{name}:missing")
+                # a directory (bert/cnhuhbert) -- hash its presence + name only,
+                # walking every file inside would be needlessly slow per call
+                parts.append(f"{name}:dir:{path.name}")
         parts.append(str(sorted(engine_config.extra.items())))
 
         payload = "|".join(parts)
