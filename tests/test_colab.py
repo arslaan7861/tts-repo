@@ -96,29 +96,77 @@ def test_fetch_model_gpt_sovits_skips_present_sources(tmp_path, monkeypatch):
 
 
 def test_fetch_model_gpt_sovits_clones_missing_sources(tmp_path, monkeypatch):
+    """The GPT-SoVITS package is git-cloned; pretrained weights are downloaded
+    file-by-file over plain HTTPS (Colab's base image has no git-lfs, so a
+    plain `git clone` of the HuggingFace repo would silently pull LFS pointer
+    stubs instead of the real weights -- see colab.py's module comment)."""
     model_dir = tmp_path / "gpt-sovits"
 
-    calls: list[list[str]] = []
+    run_calls: list[list[str]] = []
 
     def fake_run(cmd, **kw):
-        calls.append(cmd)
+        run_calls.append(cmd)
         # simulate the clone having populated the marker file, like real
         # git clone would, so the function's own follow-up checks pass
         if cmd[:2] == ["git", "clone"] and cmd[-2] == colab_module._GPT_SOVITS_REPO_URL:
             dest = Path(cmd[-1])
             (dest / _GPT_SOVITS_PACKAGE_MARKER).parent.mkdir(parents=True, exist_ok=True)
             (dest / _GPT_SOVITS_PACKAGE_MARKER).write_text("stub")
-        elif cmd[:2] == ["git", "clone"] and cmd[-2] == colab_module._GPT_SOVITS_WEIGHTS_URL:
-            dest = Path(cmd[-1])
-            marker_rel = _GPT_SOVITS_WEIGHTS_MARKER
-            (dest / marker_rel).parent.mkdir(parents=True, exist_ok=True)
-            (dest / marker_rel).write_bytes(b"stub")
+
+    downloaded: list[tuple[str, Path]] = []
+
+    def fake_download(url, dest):
+        downloaded.append((url, dest))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"stub")
 
     monkeypatch.setattr(colab_module, "_run", fake_run)
+    monkeypatch.setattr(colab_module, "_download", fake_download)
 
     result = fetch_model("gpt-sovits", EngineConfig(name="gpt-sovits", model_dir=str(model_dir)))
 
     assert result == model_dir
     assert (model_dir / _GPT_SOVITS_PACKAGE_MARKER).is_file()
     assert (model_dir / _GPT_SOVITS_WEIGHTS_MARKER).is_file()
-    assert any(cmd[:2] == ["git", "clone"] for cmd in calls)
+    assert any(cmd[:2] == ["git", "clone"] for cmd in run_calls)
+    # every weights file was fetched by plain HTTPS, not git
+    assert len(downloaded) == len(colab_module._GPT_SOVITS_WEIGHTS_FILES)
+    assert all(url.startswith(colab_module._GPT_SOVITS_WEIGHTS_BASE_URL) for url, _ in downloaded)
+    assert not any(cmd[:2] == ["git", "lfs"] for cmd in run_calls)
+
+
+def test_fetch_model_gpt_sovits_resumes_partial_weights(tmp_path, monkeypatch):
+    """A re-run after a partial/interrupted download only fetches what's missing.
+
+    The marker file (used for the fast "already done" short-circuit) must
+    itself be among the missing files here, otherwise fetch_model correctly
+    takes the already-populated fast path instead of checking file-by-file.
+    """
+    model_dir = tmp_path / "gpt-sovits"
+    package_marker = model_dir / _GPT_SOVITS_PACKAGE_MARKER
+    package_marker.parent.mkdir(parents=True)
+    package_marker.write_text("stub")
+
+    # pre-populate every weights file except the marker itself
+    missing = _GPT_SOVITS_WEIGHTS_MARKER
+    already_have = [f for f in colab_module._GPT_SOVITS_WEIGHTS_FILES if f != missing]
+    for rel_path in already_have:
+        dest = model_dir / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"stub")
+
+    downloaded: list[str] = []
+
+    def fake_download(url, dest):
+        downloaded.append(url)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"stub")
+
+    monkeypatch.setattr(colab_module, "_run", lambda cmd, **kw: None)
+    monkeypatch.setattr(colab_module, "_download", fake_download)
+
+    fetch_model("gpt-sovits", EngineConfig(name="gpt-sovits", model_dir=str(model_dir)))
+
+    # only the one missing file was fetched, not all 8 again
+    assert len(downloaded) == 1
+    assert missing in downloaded[0]

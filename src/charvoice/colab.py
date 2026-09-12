@@ -132,12 +132,40 @@ def mount_drive(
 
 
 _GPT_SOVITS_REPO_URL = "https://github.com/RVC-Boss/GPT-SoVITS.git"
-_GPT_SOVITS_WEIGHTS_URL = "https://huggingface.co/lj1995/GPT-SoVITS"
+_GPT_SOVITS_WEIGHTS_BASE_URL = "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main"
 # Marker files checked per source before (re-)fetching it, so a re-run of
 # this cell is a no-op once both are present -- cheap existence checks, no
 # hashing, matching requirements.md section 2's "no repeated downloads" rule.
 _GPT_SOVITS_PACKAGE_MARKER = "GPT_SoVITS/TTS_infer_pack/TTS.py"
 _GPT_SOVITS_WEIGHTS_MARKER = "gsv-v2final-pretrained/s2G2333k.pth"
+
+# The exact files engines/gpt_sovits.py's _checkpoint_paths() resolves, listed
+# individually and downloaded over plain HTTPS. Colab's base image has no
+# git-lfs (the HF repo's checkpoints are LFS objects, so a plain `git clone`
+# there would silently pull pointer stubs, not the actual weights), and this
+# repo also bundles v3/v4/v2Pro weights we don't need -- fetching only these
+# 8 files is both simpler and smaller than cloning the whole thing.
+_GPT_SOVITS_WEIGHTS_FILES = (
+    "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt",
+    "gsv-v2final-pretrained/s2G2333k.pth",
+    "chinese-roberta-wwm-ext-large/config.json",
+    "chinese-roberta-wwm-ext-large/pytorch_model.bin",
+    "chinese-roberta-wwm-ext-large/tokenizer.json",
+    "chinese-hubert-base/config.json",
+    "chinese-hubert-base/preprocessor_config.json",
+    "chinese-hubert-base/pytorch_model.bin",
+)
+
+
+def _download(url: str, dest: Path) -> None:
+    """Stream `url` to `dest`, writing to a temp name first (atomic on success)."""
+    import urllib.request
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with urllib.request.urlopen(url) as response, open(tmp, "wb") as f:  # noqa: S310
+        shutil.copyfileobj(response, f)
+    tmp.replace(dest)
 
 
 def _fetch_gpt_sovits(model_dir: Path) -> None:
@@ -147,8 +175,9 @@ def _fetch_gpt_sovits(model_dir: Path) -> None:
     (needed on sys.path for `from GPT_SoVITS.TTS_infer_pack.TTS import TTS`)
     and the pretrained checkpoints from HuggingFace (too large to vendor into
     this repo, per requirements.md section 14's "don't hard-code model paths"
-    and section 18's model-size guidance). Each is skipped independently if
-    already present, so interrupting one doesn't force re-fetching the other.
+    and section 18's model-size guidance). Each file is skipped independently
+    if already present, so an interrupted download resumes at the next file
+    instead of starting over.
     """
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -161,18 +190,13 @@ def _fetch_gpt_sovits(model_dir: Path) -> None:
     if (model_dir / _GPT_SOVITS_WEIGHTS_MARKER).is_file():
         print(f"fetch_model(): pretrained v2 weights already present under {model_dir}.")
     else:
-        print(f"fetch_model(): cloning pretrained weights into {model_dir} ...")
-        # The HuggingFace repo is itself a git repo (with git-lfs for the
-        # large checkpoint files); clone it directly rather than adding a
-        # huggingface_hub dependency for a single one-time download.
-        _run(["git", "lfs", "install", "--skip-repo"])
-        _run(["git", "clone", _GPT_SOVITS_WEIGHTS_URL, str(model_dir / "_weights_tmp")])
-        weights_tmp = model_dir / "_weights_tmp"
-        for child in weights_tmp.iterdir():
-            if child.name == ".git":
+        print("fetch_model(): downloading pretrained v2 weights ...")
+        for rel_path in _GPT_SOVITS_WEIGHTS_FILES:
+            dest = model_dir / rel_path
+            if dest.is_file():
                 continue
-            child.rename(model_dir / child.name)
-        shutil.rmtree(weights_tmp, ignore_errors=True)
+            print(f"  {rel_path}")
+            _download(f"{_GPT_SOVITS_WEIGHTS_BASE_URL}/{rel_path}", dest)
 
     if str(model_dir) not in sys.path:
         sys.path.insert(0, str(model_dir))
