@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -217,6 +218,10 @@ def test_fetch_model_gpt_sovits_clones_missing_sources(tmp_path, monkeypatch):
 
     monkeypatch.setattr(colab_module, "_run", fake_run)
     monkeypatch.setattr(colab_module, "_download", fake_download)
+    # fetch_model mutates the real sys.path (it must, so a real TTS.py
+    # import would work later) -- restore it so this test doesn't leak
+    # entries into others.
+    monkeypatch.setattr(sys, "path", list(sys.path))
 
     result = fetch_model("gpt-sovits", EngineConfig(name="gpt-sovits", model_dir=str(model_dir)))
 
@@ -228,6 +233,11 @@ def test_fetch_model_gpt_sovits_clones_missing_sources(tmp_path, monkeypatch):
     assert len(downloaded) == len(colab_module._GPT_SOVITS_WEIGHTS_FILES)
     assert all(url.startswith(colab_module._GPT_SOVITS_WEIGHTS_BASE_URL) for url, _ in downloaded)
     assert not any(cmd[:2] == ["git", "lfs"] for cmd in run_calls)
+    # TTS.py imports unqualified (`from AR.models...`), which upstream's own
+    # api_v2.py satisfies by putting both the repo root and its GPT_SoVITS/
+    # subfolder on sys.path -- model_dir IS that repo root here.
+    assert str(model_dir) in sys.path
+    assert str(model_dir / "GPT_SoVITS") in sys.path
 
 
 def test_fetch_model_gpt_sovits_resumes_partial_weights(tmp_path, monkeypatch):

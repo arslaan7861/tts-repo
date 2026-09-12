@@ -298,8 +298,16 @@ def _fetch_gpt_sovits(model_dir: Path) -> None:
             print(f"  {rel_path}")
             _download(f"{_GPT_SOVITS_WEIGHTS_BASE_URL}/{rel_path}", dest)
 
-    if str(model_dir) not in sys.path:
-        sys.path.insert(0, str(model_dir))
+    # GPT-SoVITS's own TTS.py imports unqualified (`from AR.models...`,
+    # `from tools.audio_sr...`), not `from GPT_SoVITS.AR.models...` -- it
+    # expects to be run from its own repo root with that root AND its
+    # GPT_SoVITS/ subfolder both on sys.path (confirmed from upstream's own
+    # api_v2.py: `sys.path.append(now_dir)` then
+    # `sys.path.append(f"{now_dir}/GPT_SoVITS")`, where now_dir is cwd).
+    # model_dir IS that repo root here, since we cloned straight into it.
+    for path in (model_dir, model_dir / "GPT_SoVITS"):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
 
 
 def fetch_model(engine: str, engine_config: EngineConfig) -> Path | None:
