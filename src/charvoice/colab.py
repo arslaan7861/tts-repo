@@ -215,6 +215,42 @@ def _download(url: str, dest: Path) -> None:
     tmp.replace(dest)
 
 
+# Packages in GPT-SoVITS's requirements.txt that fail to build on a stock
+# Colab runtime and are only needed for languages charvoice doesn't use:
+#   - opencc: requirements.txt forces `--no-binary=opencc` (a source build on
+#     every platform, bypassing opencc's own prebuilt wheels), which needs a
+#     C++ toolchain Colab doesn't ship by default. Used for Chinese text
+#     simplified/traditional conversion.
+#   - python_mecab_ko: needs the system mecab-ko library, absent on Colab.
+#     Used for Korean tokenization.
+# Our charvoice.engines.gpt_sovits only drives the "en" path (see its
+# _SUPPORTED_LANGUAGES / language validation), so these are never imported in
+# practice -- TextPreprocessor imports its per-language cleaners lazily, by
+# language. Skipping them trades "cannot synthesize zh/ko text" (not a
+# regression: those were never wired up or tested here) for "the English
+# path actually installs on stock Colab."
+_GPT_SOVITS_SKIP_REQUIREMENTS = ("opencc", "python_mecab_ko")
+
+
+def _filtered_requirements(requirements_file: Path) -> Path:
+    """Copy `requirements_file` with lines naming `_GPT_SOVITS_SKIP_REQUIREMENTS`
+    removed, so `pip install -r` never attempts those builds. Catches both a
+    plain requirement line (`opencc`) and a pip directive targeting it
+    (`--no-binary=opencc`, which GPT-SoVITS's requirements.txt uses to force
+    a source build of opencc specifically -- the thing we're avoiding).
+    Returns the path to the filtered copy, written alongside the original.
+    """
+    filtered_path = requirements_file.with_name("requirements.charvoice-filtered.txt")
+    lines = requirements_file.read_text().splitlines()
+    kept = [
+        line
+        for line in lines
+        if not any(name in line.strip().lower() for name in _GPT_SOVITS_SKIP_REQUIREMENTS)
+    ]
+    filtered_path.write_text("\n".join(kept) + "\n")
+    return filtered_path
+
+
 def _fetch_gpt_sovits(model_dir: Path) -> None:
     """Clone GPT-SoVITS, install its own Python deps, and pull v2 weights.
 
@@ -244,11 +280,12 @@ def _fetch_gpt_sovits(model_dir: Path) -> None:
         # was cloned in an earlier run before this step existed (or was
         # interrupted partway through).
         print("fetch_model(): installing GPT-SoVITS's own Python dependencies ...")
-        # No -q here deliberately: this install is the most likely to fail
-        # (GPT-SoVITS's requirements.txt pulls in build-from-source packages
-        # like pyopenjtalk/ctranslate2), and full pip output is what makes a
-        # failure here diagnosable instead of a bare exit code.
-        _run([sys.executable, "-m", "pip", "install", "-r", str(requirements_file)])
+        filtered = _filtered_requirements(requirements_file)
+        # No -q here deliberately: this install has already failed once on a
+        # source build (see _filtered_requirements), and full pip output is
+        # what makes the next such failure diagnosable instead of a bare
+        # exit code.
+        _run([sys.executable, "-m", "pip", "install", "-r", str(filtered)])
 
     if (model_dir / _GPT_SOVITS_WEIGHTS_MARKER).is_file():
         print(f"fetch_model(): pretrained v2 weights already present under {model_dir}.")

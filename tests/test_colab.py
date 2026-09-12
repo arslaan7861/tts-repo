@@ -140,11 +140,35 @@ def test_fetch_model_gpt_sovits_skips_present_sources(tmp_path, monkeypatch):
     assert calls == []  # nothing needed fetching, so no subprocess ran
 
 
-def test_fetch_model_gpt_sovits_installs_own_requirements(tmp_path, monkeypatch):
+def test_filtered_requirements_drops_skipped_packages(tmp_path):
+    """opencc (forced to build from source by --no-binary=opencc) and
+    python_mecab_ko (needs the system mecab-ko library) both fail to build
+    on a stock Colab runtime and are only needed for zh/ko, which charvoice's
+    gpt-sovits adapter never uses -- see _GPT_SOVITS_SKIP_REQUIREMENTS."""
+    src = tmp_path / "requirements.txt"
+    src.write_text(
+        "--no-binary=opencc\n"
+        "numpy<2.0\n"
+        "librosa==0.10.2\n"
+        "opencc\n"
+        "python_mecab_ko; sys_platform != 'win32'\n"
+        "ffmpeg-python\n"
+    )
+
+    filtered = colab_module._filtered_requirements(src)
+
+    kept = filtered.read_text().splitlines()
+    assert kept == ["numpy<2.0", "librosa==0.10.2", "ffmpeg-python"]
+    assert filtered != src  # a separate file; the original is untouched
+    assert "opencc" in src.read_text()  # original left as-is
+
+
+def test_fetch_model_gpt_sovits_installs_filtered_requirements(tmp_path, monkeypatch):
     """TTS.py imports ~35 packages (ffmpeg-python, librosa, ...) our colab
-    extra doesn't vendor; GPT-SoVITS's own requirements.txt is installed
-    whenever present, not just right after a fresh clone, so it self-heals a
-    package dir cloned before this step existed or left mid-install."""
+    extra doesn't vendor; GPT-SoVITS's own requirements.txt (minus the
+    packages that fail to build, see above) is installed whenever present,
+    not just right after a fresh clone, so it self-heals a package dir
+    cloned before this step existed or left mid-install."""
     model_dir = tmp_path / "gpt-sovits"
     package_marker = model_dir / _GPT_SOVITS_PACKAGE_MARKER
     weights_marker = model_dir / _GPT_SOVITS_WEIGHTS_MARKER
@@ -152,7 +176,7 @@ def test_fetch_model_gpt_sovits_installs_own_requirements(tmp_path, monkeypatch)
     package_marker.write_text("stub")
     weights_marker.parent.mkdir(parents=True)
     weights_marker.write_bytes(b"stub")
-    (model_dir / "requirements.txt").write_text("ffmpeg-python\nlibrosa\n")
+    (model_dir / "requirements.txt").write_text("ffmpeg-python\nlibrosa\nopencc\n")
 
     calls: list[list[str]] = []
     monkeypatch.setattr(colab_module, "_run", lambda cmd, **kw: calls.append(cmd))
@@ -162,7 +186,8 @@ def test_fetch_model_gpt_sovits_installs_own_requirements(tmp_path, monkeypatch)
     pip_calls = [c for c in calls if "pip" in c and "install" in c]
     assert len(pip_calls) == 1
     assert "-r" in pip_calls[0]
-    assert str(model_dir / "requirements.txt") in pip_calls[0]
+    filtered_arg = pip_calls[0][pip_calls[0].index("-r") + 1]
+    assert "opencc" not in Path(filtered_arg).read_text()
 
 
 def test_fetch_model_gpt_sovits_clones_missing_sources(tmp_path, monkeypatch):
