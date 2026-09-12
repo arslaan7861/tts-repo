@@ -9,11 +9,18 @@ function outside Colab is refused, and only where it would not make sense
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from charvoice.config import Config, EngineConfig
+
+# Copied from the repo clone into the Drive project folder on first mount
+# only -- see _seed_drive_project_dir. Model checkpoints are deliberately
+# excluded: they are large and belong in Drive's own models/ once fetched
+# there directly, not duplicated from the repo clone.
+_SEED_ENTRIES = ("voices", "scripts", "config.yaml")
 
 
 def in_colab() -> bool:
@@ -68,12 +75,45 @@ def setup_colab_environment(
     return repo_dir
 
 
-def mount_drive(subpath: str = "character_voice_generator") -> Path | None:
+def _seed_drive_project_dir(project_dir: Path, repo_dir: Path) -> None:
+    """Copy voices/scripts/config.yaml into an empty Drive project folder.
+
+    A freshly mounted Drive folder has none of this -- only the git clone
+    does. Without seeding, `config.resolve("voices")` would silently point
+    at an empty Drive directory and every profile lookup would report
+    "no voice profile" even though the repo's profiles are right there
+    (the bug this function exists to prevent). Only runs when the Drive
+    folder doesn't already have its own `voices/`, so a user's edits there
+    are never overwritten on a later mount.
+    """
+    if (project_dir / "voices").exists():
+        return  # already seeded (or the user built their own) -- don't touch it
+
+    print(f"First time using {project_dir}: copying starter files from the repo...")
+    for name in _SEED_ENTRIES:
+        src = repo_dir / name
+        dest = project_dir / name
+        if not src.exists() or dest.exists():
+            continue
+        if src.is_dir():
+            shutil.copytree(src, dest)
+        else:
+            shutil.copyfile(src, dest)
+        print(f"  copied {name}")
+
+
+def mount_drive(
+    subpath: str = "character_voice_generator",
+    repo_dir: Path | str | None = None,
+) -> Path | None:
     """Mount Google Drive and return the project folder under MyDrive.
 
     Returns None outside Colab or if the user skips mounting -- callers treat
     a None return as "stay on the local checkout", never as an error
-    (requirements.md section 13).
+    (requirements.md section 13). On first use, seeds the Drive folder with
+    the repo's voices/scripts/config.yaml so it starts as a working project
+    directory rather than an empty one (pass `repo_dir` -- typically the
+    clone from setup_colab_environment -- to enable this).
     """
     if not in_colab():
         print("mount_drive(): not running in Colab, skipping.")
@@ -84,6 +124,10 @@ def mount_drive(subpath: str = "character_voice_generator") -> Path | None:
     drive.mount("/content/drive")
     project_dir = Path("/content/drive/MyDrive") / subpath
     project_dir.mkdir(parents=True, exist_ok=True)
+
+    if repo_dir is not None:
+        _seed_drive_project_dir(project_dir, Path(repo_dir))
+
     return project_dir
 
 
