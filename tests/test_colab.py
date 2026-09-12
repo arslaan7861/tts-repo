@@ -145,7 +145,9 @@ def test_filtered_requirements_drops_skipped_packages(tmp_path):
     """opencc (forced to build from source by --no-binary=opencc) and
     python_mecab_ko (needs the system mecab-ko library) both fail to build
     on a stock Colab runtime and are only needed for zh/ko, which charvoice's
-    gpt-sovits adapter never uses -- see _GPT_SOVITS_SKIP_REQUIREMENTS."""
+    gpt-sovits adapter never uses. numpy<2.0 force-downgrades Colab's
+    preinstalled numpy, which then breaks transformers' own Hubert import
+    (StringDType is numpy-2.0+-only). See _GPT_SOVITS_SKIP_REQUIREMENTS."""
     src = tmp_path / "requirements.txt"
     src.write_text(
         "--no-binary=opencc\n"
@@ -159,7 +161,7 @@ def test_filtered_requirements_drops_skipped_packages(tmp_path):
     filtered = colab_module._filtered_requirements(src)
 
     kept = filtered.read_text().splitlines()
-    assert kept == ["numpy<2.0", "librosa==0.10.2", "ffmpeg-python"]
+    assert kept == ["librosa==0.10.2", "ffmpeg-python"]
     assert filtered != src  # a separate file; the original is untouched
     assert "opencc" in src.read_text()  # original left as-is
 

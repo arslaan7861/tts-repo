@@ -215,21 +215,23 @@ def _download(url: str, dest: Path) -> None:
     tmp.replace(dest)
 
 
-# Packages in GPT-SoVITS's requirements.txt that fail to build on a stock
-# Colab runtime and are only needed for languages charvoice doesn't use:
+# Packages/constraints in GPT-SoVITS's requirements.txt that break a stock
+# Colab runtime:
 #   - opencc: requirements.txt forces `--no-binary=opencc` (a source build on
 #     every platform, bypassing opencc's own prebuilt wheels), which needs a
 #     C++ toolchain Colab doesn't ship by default. Used for Chinese text
-#     simplified/traditional conversion.
+#     simplified/traditional conversion -- charvoice's gpt-sovits adapter
+#     only drives the "en" path (see its _SUPPORTED_LANGUAGES), so this is
+#     never imported in practice.
 #   - python_mecab_ko: needs the system mecab-ko library, absent on Colab.
-#     Used for Korean tokenization.
-# Our charvoice.engines.gpt_sovits only drives the "en" path (see its
-# _SUPPORTED_LANGUAGES / language validation), so these are never imported in
-# practice -- TextPreprocessor imports its per-language cleaners lazily, by
-# language. Skipping them trades "cannot synthesize zh/ko text" (not a
-# regression: those were never wired up or tested here) for "the English
-# path actually installs on stock Colab."
-_GPT_SOVITS_SKIP_REQUIREMENTS = ("opencc", "python_mecab_ko")
+#     Used for Korean tokenization -- same "en"-only reasoning as above.
+#   - numpy<2.0: force-downgrades Colab's preinstalled numpy, which then
+#     breaks transformers==4.49.0's own Hubert import (`module 'numpy.dtypes'
+#     has no attribute 'StringDType'`, a NumPy-2.0+-only attribute some
+#     transformers-internal lazy import checks for). Dropping this line lets
+#     pip keep whatever numpy Colab already has, which is what was already
+#     working before this install touched anything.
+_GPT_SOVITS_SKIP_REQUIREMENTS = ("opencc", "python_mecab_ko", "numpy<2.0")
 
 # requirements.txt's own range (`transformers<5,>=4.51`) resolves to a
 # version newer than GPT-SoVITS actually works with: feature_extractor/
