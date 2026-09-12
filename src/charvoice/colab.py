@@ -231,22 +231,38 @@ def _download(url: str, dest: Path) -> None:
 # path actually installs on stock Colab."
 _GPT_SOVITS_SKIP_REQUIREMENTS = ("opencc", "python_mecab_ko")
 
+# requirements.txt's own range (`transformers<5,>=4.51`) resolves to a
+# version newer than GPT-SoVITS actually works with: feature_extractor/
+# cnhubert.py's `from transformers import HubertModel` fails on whatever
+# 4.57.x pip picks by default, a documented upstream incompatibility
+# (https://github.com/RVC-Boss/GPT-SoVITS/issues/2687 -- peft trying to
+# import something transformers' internals moved/removed at that version).
+# That issue's own fix is exactly this pin.
+_GPT_SOVITS_PIN_REQUIREMENTS = {"transformers": "transformers==4.49.0"}
+
 
 def _filtered_requirements(requirements_file: Path) -> Path:
-    """Copy `requirements_file` with lines naming `_GPT_SOVITS_SKIP_REQUIREMENTS`
-    removed, so `pip install -r` never attempts those builds. Catches both a
-    plain requirement line (`opencc`) and a pip directive targeting it
+    """Copy `requirements_file` with `_GPT_SOVITS_SKIP_REQUIREMENTS` lines
+    removed and `_GPT_SOVITS_PIN_REQUIREMENTS` lines rewritten to an exact
+    known-working version, so `pip install -r` never attempts an opencc/
+    python_mecab_ko build and never resolves transformers to a version that
+    breaks GPT-SoVITS's own imports. Skip-matching catches both a plain
+    requirement line (`opencc`) and a pip directive targeting it
     (`--no-binary=opencc`, which GPT-SoVITS's requirements.txt uses to force
     a source build of opencc specifically -- the thing we're avoiding).
     Returns the path to the filtered copy, written alongside the original.
     """
     filtered_path = requirements_file.with_name("requirements.charvoice-filtered.txt")
-    lines = requirements_file.read_text().splitlines()
-    kept = [
-        line
-        for line in lines
-        if not any(name in line.strip().lower() for name in _GPT_SOVITS_SKIP_REQUIREMENTS)
-    ]
+    kept: list[str] = []
+    for line in requirements_file.read_text().splitlines():
+        normalized = line.strip().lower()
+        if any(name in normalized for name in _GPT_SOVITS_SKIP_REQUIREMENTS):
+            continue
+        pin = next(
+            (p for name, p in _GPT_SOVITS_PIN_REQUIREMENTS.items() if normalized.startswith(name)),
+            None,
+        )
+        kept.append(pin if pin else line)
     filtered_path.write_text("\n".join(kept) + "\n")
     return filtered_path
 

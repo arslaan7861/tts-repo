@@ -164,6 +164,24 @@ def test_filtered_requirements_drops_skipped_packages(tmp_path):
     assert "opencc" in src.read_text()  # original left as-is
 
 
+def test_filtered_requirements_pins_transformers(tmp_path):
+    """requirements.txt's own transformers<5,>=4.51 resolves to a version
+    whose HubertModel import fails inside GPT-SoVITS's cnhubert.py -- a
+    documented upstream issue (RVC-Boss/GPT-SoVITS#2687) whose own fix is
+    pinning exactly 4.49.0."""
+    src = tmp_path / "requirements.txt"
+    src.write_text("numpy<2.0\ntransformers<5,>=4.51\nx_transformers\n")
+
+    filtered = colab_module._filtered_requirements(src)
+
+    kept = filtered.read_text().splitlines()
+    assert "transformers==4.49.0" in kept
+    assert "transformers<5,>=4.51" not in kept
+    # x_transformers is a different package -- must not be mistaken for a
+    # transformers line and rewritten
+    assert "x_transformers" in kept
+
+
 def test_fetch_model_gpt_sovits_installs_filtered_requirements(tmp_path, monkeypatch):
     """TTS.py imports ~35 packages (ffmpeg-python, librosa, ...) our colab
     extra doesn't vendor; GPT-SoVITS's own requirements.txt (minus the
