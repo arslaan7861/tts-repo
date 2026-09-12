@@ -126,24 +126,33 @@ class GPTSoVITSEngine(Engine):
                 "Run this on a Colab GPU runtime."
             )
 
-        # GPT-SoVITS's own package, expected on sys.path because model_dir's
-        # repo root (the GPT-SoVITS checkout, not just its weights) was
-        # installed/cloned per requirements.md section 14.
-        from GPT_SoVITS.TTS_infer_pack.TTS import TTS  # noqa: PLC0415
+        import os
 
-        version = engine_config.extra.get("version", _DEFAULT_VERSION)
-        config = {
-            "device": "cuda",
-            "is_half": bool(engine_config.extra.get("is_half", True)),
-            "version": version,
-            "t2s_weights_path": str(paths["t2s_weights_path"]),
-            "vits_weights_path": str(paths["vits_weights_path"]),
-            "bert_base_path": str(paths["bert_base_path"]),
-            "cnhuhbert_base_path": str(paths["cnhuhbert_base_path"]),
-        }
+        # GPT-SoVITS's own package expects os.getcwd() to be its repo root at import time
+        # (e.g. `now_dir = os.getcwd()` in TTS.py, `sys.path.append(f"{os.getcwd()}/...")` in sv.py).
+        # We temporarily change cwd so its module-level path variables capture the correct location.
+        model_dir = Path(engine_config.model_dir).expanduser()
+        old_cwd = os.getcwd()
+        os.chdir(model_dir)
+        try:
+            # Expected on sys.path because model_dir's repo root was cloned per requirements.md
+            from GPT_SoVITS.TTS_infer_pack.TTS import TTS  # noqa: PLC0415
 
-        self._tts = TTS(config)
-        self._model_dir = Path(engine_config.model_dir).expanduser()  # type: ignore[arg-type]
+            version = engine_config.extra.get("version", _DEFAULT_VERSION)
+            config = {
+                "device": "cuda",
+                "is_half": bool(engine_config.extra.get("is_half", True)),
+                "version": version,
+                "t2s_weights_path": str(paths["t2s_weights_path"]),
+                "vits_weights_path": str(paths["vits_weights_path"]),
+                "bert_base_path": str(paths["bert_base_path"]),
+                "cnhuhbert_base_path": str(paths["cnhuhbert_base_path"]),
+            }
+
+            self._tts = TTS(config)
+            self._model_dir = model_dir
+        finally:
+            os.chdir(old_cwd)
 
     def prepare_speaker(self, profile: VoiceProfile) -> SpeakerHandle:
         """Validate and stash this character's reference audio/text/language.
@@ -181,6 +190,7 @@ class GPTSoVITSEngine(Engine):
             raise GenerationError("gpt-sovits engine.load() must be called before generation.")
 
         import numpy as np  # noqa: PLC0415
+        import os
 
         state = speaker.engine_state
         request = {
@@ -192,6 +202,8 @@ class GPTSoVITSEngine(Engine):
             "speed_factor": speaker.profile.speed or 1.0,
         }
 
+        old_cwd = os.getcwd()
+        os.chdir(self._model_dir)
         try:
             last_sample_rate, last_chunk = None, None
             for sample_rate, chunk in self._tts.run(request):
@@ -200,6 +212,8 @@ class GPTSoVITSEngine(Engine):
             raise GenerationError(
                 f'gpt-sovits failed synthesizing line for "{speaker.profile.id}": {exc}'
             ) from exc
+        finally:
+            os.chdir(old_cwd)
 
         if last_chunk is None:
             raise GenerationError(f'gpt-sovits produced no audio for "{speaker.profile.id}".')
