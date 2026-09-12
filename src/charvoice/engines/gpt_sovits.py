@@ -135,6 +135,10 @@ class GPTSoVITSEngine(Engine):
         old_cwd = os.getcwd()
         os.chdir(model_dir)
         try:
+            # Newer NLTK versions require this specific _eng package which GPT-SoVITS doesn't fetch
+            import nltk  # noqa: PLC0415
+            nltk.download("averaged_perceptron_tagger_eng", quiet=True)
+
             # Expected on sys.path because model_dir's repo root was cloned per requirements.md
             from GPT_SoVITS.TTS_infer_pack.TTS import TTS  # noqa: PLC0415
 
