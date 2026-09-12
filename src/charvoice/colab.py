@@ -196,15 +196,18 @@ def _download(url: str, dest: Path) -> None:
 
 
 def _fetch_gpt_sovits(model_dir: Path) -> None:
-    """Clone the GPT-SoVITS repo (for its Python package) and pull v2 weights.
+    """Clone GPT-SoVITS, install its own Python deps, and pull v2 weights.
 
-    Two independent sources land in the same `model_dir`: the upstream repo
-    (needed on sys.path for `from GPT_SoVITS.TTS_infer_pack.TTS import TTS`)
-    and the pretrained checkpoints from HuggingFace (too large to vendor into
-    this repo, per requirements.md section 14's "don't hard-code model paths"
-    and section 18's model-size guidance). Each file is skipped independently
-    if already present, so an interrupted download resumes at the next file
-    instead of starting over.
+    Three independent steps land in/around the same `model_dir`: the
+    upstream repo (needed on sys.path for
+    `from GPT_SoVITS.TTS_infer_pack.TTS import TTS`), its own
+    `requirements.txt` (TTS.py imports ffmpeg-python, librosa, and ~35 other
+    packages our `colab` extra deliberately doesn't vendor -- GPT-SoVITS's
+    own requirements file is the actual contract for what it needs), and the
+    pretrained checkpoints from HuggingFace (too large to vendor into this
+    repo, per requirements.md section 14's "don't hard-code model paths" and
+    section 18's model-size guidance). Each step is skipped/re-run
+    independently, so an interrupted run resumes instead of starting over.
     """
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -213,6 +216,15 @@ def _fetch_gpt_sovits(model_dir: Path) -> None:
     else:
         print(f"fetch_model(): cloning GPT-SoVITS into {model_dir} ...")
         _run(["git", "clone", "--depth", "1", _GPT_SOVITS_REPO_URL, str(model_dir)])
+
+    requirements_file = model_dir / "requirements.txt"
+    if requirements_file.is_file():
+        # Always run, not just right after a fresh clone: pip skips already
+        # -satisfied packages quickly, and this self-heals a package dir that
+        # was cloned in an earlier run before this step existed (or was
+        # interrupted partway through).
+        print("fetch_model(): installing GPT-SoVITS's own Python dependencies ...")
+        _run([sys.executable, "-m", "pip", "install", "-r", str(requirements_file), "-q"])
 
     if (model_dir / _GPT_SOVITS_WEIGHTS_MARKER).is_file():
         print(f"fetch_model(): pretrained v2 weights already present under {model_dir}.")

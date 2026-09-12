@@ -117,6 +117,31 @@ def test_fetch_model_gpt_sovits_skips_present_sources(tmp_path, monkeypatch):
     assert calls == []  # nothing needed fetching, so no subprocess ran
 
 
+def test_fetch_model_gpt_sovits_installs_own_requirements(tmp_path, monkeypatch):
+    """TTS.py imports ~35 packages (ffmpeg-python, librosa, ...) our colab
+    extra doesn't vendor; GPT-SoVITS's own requirements.txt is installed
+    whenever present, not just right after a fresh clone, so it self-heals a
+    package dir cloned before this step existed or left mid-install."""
+    model_dir = tmp_path / "gpt-sovits"
+    package_marker = model_dir / _GPT_SOVITS_PACKAGE_MARKER
+    weights_marker = model_dir / _GPT_SOVITS_WEIGHTS_MARKER
+    package_marker.parent.mkdir(parents=True)
+    package_marker.write_text("stub")
+    weights_marker.parent.mkdir(parents=True)
+    weights_marker.write_bytes(b"stub")
+    (model_dir / "requirements.txt").write_text("ffmpeg-python\nlibrosa\n")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(colab_module, "_run", lambda cmd, **kw: calls.append(cmd))
+
+    fetch_model("gpt-sovits", EngineConfig(name="gpt-sovits", model_dir=str(model_dir)))
+
+    pip_calls = [c for c in calls if "pip" in c and "install" in c]
+    assert len(pip_calls) == 1
+    assert "-r" in pip_calls[0]
+    assert str(model_dir / "requirements.txt") in pip_calls[0]
+
+
 def test_fetch_model_gpt_sovits_clones_missing_sources(tmp_path, monkeypatch):
     """The GPT-SoVITS package is git-cloned; pretrained weights are downloaded
     file-by-file over plain HTTPS (Colab's base image has no git-lfs, so a
