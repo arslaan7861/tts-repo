@@ -19,6 +19,7 @@ Two rules shape every function here:
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,27 +29,30 @@ from charvoice.audio import (
     StreamingWavWriter,
     conform,
     export_mp3,
+    limit_peak,
     load_segment,
+    normalize_loudness,
     save_segment,
     silence,
 )
 from charvoice.cache import CacheKey, SegmentCache
 from charvoice.config import Config
-from charvoice.engines.base import Engine, SpeakerHandle
-from charvoice.engines.registry import get_engine
+from charvoice.engines.base import SpeakerHandle
+from charvoice.engines.registry import get_engine, probe_engine
 from charvoice.errors import ScriptValidationError, ValidationIssue
 from charvoice.parser import ScriptLine, speakers_in
 from charvoice.profiles import ProfileStore, fingerprint_profile
 
 
 def validate_script(
-    lines: list[ScriptLine], profiles: ProfileStore, engine: Engine | None = None
+    lines: list[ScriptLine], profiles: ProfileStore, config: Config | None = None
 ) -> None:
     """Check every line against `profiles`, collecting every problem.
 
     Raises ScriptValidationError listing ALL unknown speakers and, when
-    `engine` is given, all profiles missing a field that engine requires
-    (requirements.md section 11) -- never just the first one found, so a
+    `config` is given, all profiles missing a field required by *their own*
+    engine (each speaker may name a different one via `profile.engine`,
+    requirements.md section 11) -- never just the first problem found, so a
     script can be fixed in one pass instead of a rerun-per-error loop.
     """
     issues: list[ValidationIssue] = []
@@ -72,26 +76,28 @@ def validate_script(
                 )
             )
 
-    if engine is not None:
-        required = engine.required_profile_fields()
-        if required:
-            for speaker_id in speakers_in(lines):
-                if speaker_id not in profiles:
-                    continue  # already reported above
-                profile = profiles.get(speaker_id)
-                missing = sorted(f for f in required if getattr(profile, f, None) in (None, ""))
-                if missing:
-                    issues.append(
-                        ValidationIssue(
-                            kind="missing_profile_field",
-                            message=(
-                                f'Voice profile "{speaker_id}" is missing field(s) required '
-                                f'by the generation engine: {", ".join(missing)}.'
-                            ),
-                            speaker=speaker_id,
-                            hint=f"Edit: voices/{speaker_id}/profile.yaml",
-                        )
+    if config is not None:
+        for speaker_id in speakers_in(lines):
+            if speaker_id not in profiles:
+                continue  # already reported above
+            profile = profiles.get(speaker_id)
+            engine_name = _resolve_engine_name(speaker_id, profiles, config)
+            # probe_engine, never get_engine: validation must never load a
+            # model -- see this module's docstring.
+            required = probe_engine(engine_name).required_profile_fields()
+            missing = sorted(f for f in required if getattr(profile, f, None) in (None, ""))
+            if missing:
+                issues.append(
+                    ValidationIssue(
+                        kind="missing_profile_field",
+                        message=(
+                            f'Voice profile "{speaker_id}" is missing field(s) required '
+                            f'by its engine ({profile.engine}): {", ".join(missing)}.'
+                        ),
+                        speaker=speaker_id,
+                        hint=f"Edit: voices/{speaker_id}/profile.yaml",
                     )
+                )
 
     if issues:
         raise ScriptValidationError(issues)
@@ -133,20 +139,32 @@ def _group_by_speaker(lines: list[ScriptLine]) -> dict[str, list[ScriptLine]]:
     return groups
 
 
+def _resolve_engine_name(speaker_id: str, profiles: ProfileStore, config: Config) -> str:
+    """The engine name a speaker's profile resolves to, falling back to the default.
+
+    Each character can use a different engine (requirements.md section 14's
+    engine/model/profile separation) -- `profile.engine` was previously dead
+    metadata; `generate_voiceover` always used one global engine regardless
+    of what a profile said.
+    """
+    return profiles.get(speaker_id).engine or config.tts.default_engine
+
+
 def _resolve_segments(
     lines: list[ScriptLine],
     profiles: ProfileStore,
-    engine: Engine,
-    engine_name: str,
-    model_fingerprint: str,
+    config: Config,
     cache: SegmentCache,
     progress_cb: Callable[[GenerationProgress], None] | None,
 ) -> dict[int, Path]:
     """Resolve every line to a path holding its raw (unconformed) synthesized audio.
 
-    Cache is checked per line *before* any speaker grouping happens, so a
-    character whose lines are all cache hits never triggers
-    `engine.prepare_speaker()` -- that setup is skipped entirely for them.
+    Cache is checked per line *before* any speaker grouping happens, using
+    only `probe_engine` (never `get_engine`) to compute cache keys --
+    `model_fingerprint()` works on an unloaded instance by design, so
+    checking the cache never loads a model. A character whose lines are all
+    cache hits never triggers `engine.prepare_speaker()` either, and that
+    engine is never loaded via `get_engine` at all for an all-cached run.
     """
     results: dict[int, Path] = {}
     pending: list[ScriptLine] = []
@@ -154,12 +172,14 @@ def _resolve_segments(
 
     for line in lines:
         profile = profiles.get(line.speaker_id)
+        engine_name = _resolve_engine_name(line.speaker_id, profiles, config)
+        model_fp = probe_engine(engine_name).model_fingerprint(config.tts.engine(engine_name))
         key = CacheKey(
             text=line.text,
             speaker_id=line.speaker_id,
             engine_name=engine_name,
             profile_fingerprint=fingerprint_profile(profile),
-            model_fingerprint=model_fingerprint,
+            model_fingerprint=model_fp,
         )
         keys[line.index] = key
         cached_path = cache.get(key)
@@ -178,6 +198,8 @@ def _resolve_segments(
 
     for speaker_id, speaker_lines in _group_by_speaker(pending).items():
         profile = profiles.get(speaker_id)
+        engine_name = _resolve_engine_name(speaker_id, profiles, config)
+        engine = get_engine(engine_name, config)  # only pending (cache-miss) work loads a model
         handle: SpeakerHandle = engine.prepare_speaker(profile)
         texts = [line.text for line in speaker_lines]
         segments: list[AudioSegment] = engine.generate_batch(texts, handle)
@@ -208,6 +230,50 @@ def _ordered_segments(
         yield line, load_segment(segment_paths[line.index])
 
 
+# Safety ceiling applied after LUFS normalization, so a loud outlier line
+# can't clip even though the timeline's average loudness is on target.
+_POST_LOUDNESS_PEAK_CEILING_DBFS = -1.0
+
+
+def _normalize_timeline_loudness(staging_path: Path, config: Config) -> Path:
+    """Loudness-normalize the fully assembled file, then peak-limit for safety.
+
+    Done once on the finished timeline rather than per-segment (requirements
+    section on audio consistency): measuring/targeting loudness only makes
+    sense across the whole piece, not line by line, where a quiet line and a
+    loud line would otherwise each get pushed to the same level and lose
+    their relative dynamics. Returns the path to a new staging file. Only
+    removes the pre-loudness staging file once the normalized one is fully
+    written, so a failure partway through leaves the original intact rather
+    than losing both.
+    """
+    whole = load_segment(staging_path)
+    whole = normalize_loudness(whole, config.audio.target_lufs)
+    whole = limit_peak(whole, _POST_LOUDNESS_PEAK_CEILING_DBFS)
+
+    normalized_path = staging_path.with_suffix(".loudness.wav")
+    save_segment(whole, normalized_path, subtype=config.audio.subtype)
+    staging_path.unlink(missing_ok=True)
+    return normalized_path
+
+
+def _finalize_output(staging_path: Path, output_path: Path) -> None:
+    """Move the finished file into place.
+
+    `paths.temp` and `paths.output` are independently configurable and may
+    land on different filesystems (e.g. output pointed at a mounted Drive
+    while temp stays local) -- `Path.replace` is a plain `os.rename`, which
+    raises `OSError` (EXDEV) across a filesystem boundary. `shutil.move`
+    takes the fast rename path when possible and only falls back to a
+    copy-then-delete when it must, so this stays atomic on the common case
+    and still works on the cross-device one.
+    """
+    try:
+        staging_path.replace(output_path)
+    except OSError:
+        shutil.move(str(staging_path), str(output_path))
+
+
 def generate_voiceover(
     lines: list[ScriptLine],
     profiles: ProfileStore,
@@ -219,15 +285,20 @@ def generate_voiceover(
 ) -> GenerationResult:
     """Validate, synthesize, and assemble one combined voiceover file.
 
+    Each speaker's profile may name its own engine (`profile.engine`);
+    `engine_name` here, like `config.tts.default_engine`, only applies to a
+    speaker whose profile doesn't specify one -- it's an override of the
+    fallback, not a force-override of every speaker's explicit choice.
+
     Raises ScriptValidationError before loading any model if validation
     fails. Output is staged under `paths.temp` and only renamed into place on
     success, so a failed or interrupted run never corrupts a previous output
     (requirements.md section 8).
     """
-    engine_name = engine_name or config.tts.default_engine
-    engine = get_engine(engine_name, config)
+    if engine_name:
+        config = config.with_default_engine(engine_name)
 
-    validate_script(lines, profiles, engine=engine)
+    validate_script(lines, profiles, config=config)
     if not lines:
         raise ScriptValidationError(
             [ValidationIssue(kind="empty_script", message="The script has no spoken lines.")]
@@ -247,10 +318,7 @@ def generate_voiceover(
     cache_dir = config.resolve("cache")
     cache = SegmentCache(cache_dir)
 
-    model_fp = engine.model_fingerprint(config.tts.engine(engine_name))
-    segment_paths = _resolve_segments(
-        lines, profiles, engine, engine_name, model_fp, cache, progress_cb
-    )
+    segment_paths = _resolve_segments(lines, profiles, config, cache, progress_cb)
 
     with StreamingWavWriter(
         staging_path, config.audio.sample_rate, config.audio.channels, config.audio.subtype
@@ -267,7 +335,10 @@ def generate_voiceover(
             prev_line = line
     duration_s = writer.frames_written / float(config.audio.sample_rate)
 
-    staging_path.replace(output_path)
+    if config.audio.target_lufs is not None:
+        staging_path = _normalize_timeline_loudness(staging_path, config)
+
+    _finalize_output(staging_path, output_path)
 
     if config.audio.output_format == "mp3":
         export_mp3(output_path, output_path.with_suffix(".mp3"))

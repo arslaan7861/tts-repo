@@ -8,10 +8,24 @@ project:
   name: character-voice-generator
 
 tts:
-  default_engine: gpt-sovits
+  default_engine: f5-tts
 
   engines:
     dummy: {}
+
+    f5-tts:
+      model_dir: models/f5-tts
+      # Quality tuning -- see src/charvoice/engines/f5_tts.py for what each
+      # does. Changing any of these invalidates the segment cache for lines
+      # using this engine, so a re-run actually regenerates rather than
+      # silently serving back old cached audio.
+      model: F5TTS_v1_Base
+      nfe_step: 48          # flow-matching solver steps; main quality knob
+      cfg_strength: 2.0
+      sway_sampling_coef: -1.0
+      cross_fade_duration: 0.15
+      target_rms: 0.1
+      remove_silence: true
 
     gpt-sovits:
       model_dir: models/gpt-sovits
@@ -28,7 +42,13 @@ audio:
   bit_depth: 16
   pause_between_lines_ms: 250
   pause_between_scenes_ms: 800
-  peak_dbfs: -1.0
+  # null skips per-segment peak normalization -- F5-TTS already manages its
+  # own output level (target_rms above), so re-scaling each line on top of
+  # that independently would make loudness jump line to line and amplify
+  # noise in quiet segments. target_lufs below normalizes the whole
+  # assembled file once instead, which is the right level to do it at.
+  peak_dbfs: null
+  target_lufs: -16.0
 
 paths:
   voices: voices

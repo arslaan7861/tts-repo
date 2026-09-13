@@ -318,6 +318,7 @@ audio = [
 colab = [
     { name = "librosa", version = "0.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "librosa", version = "1.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pyloudnorm" },
     { name = "soxr" },
     { name = "torch" },
     { name = "torchaudio" },
@@ -332,6 +333,7 @@ requires-dist = [
     { name = "librosa", marker = "extra == 'colab'" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pyloudnorm", marker = "extra == 'audio'" },
+    { name = "pyloudnorm", marker = "extra == 'colab'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
