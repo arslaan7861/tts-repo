@@ -128,12 +128,30 @@ def to_channels(seg: AudioSegment, target_channels: int) -> AudioSegment:
 
 
 def normalize_peak(seg: AudioSegment, target_dbfs: float = -1.0) -> AudioSegment:
-    """Scale so the peak sample hits `target_dbfs`. Leaves silence untouched."""
+    """Scale so the peak hits `target_dbfs`, exactly, up or down. Leaves silence untouched."""
     samples = seg.samples
     peak = np.max(np.abs(samples)) if samples.size else 0.0
     if peak > 0:
         scale = (10 ** (target_dbfs / 20.0)) / peak
         samples = (samples * scale).astype(np.float32)
+    return AudioSegment(samples=samples, sample_rate=seg.sample_rate)
+
+
+def limit_peak(seg: AudioSegment, ceiling_dbfs: float = -1.0) -> AudioSegment:
+    """Scale down only if the peak exceeds `ceiling_dbfs`; otherwise unchanged.
+
+    Unlike `normalize_peak` (which always rescales to hit the target
+    exactly, pulling a quiet signal UP as readily as pulling a loud one
+    down), this is a one-sided safety clamp: it never raises the level. Use
+    this after loudness normalization, where a peak already under the
+    ceiling must be left alone -- normalize_peak there would blow back past
+    the loudness target it just achieved.
+    """
+    samples = seg.samples
+    peak = np.max(np.abs(samples)) if samples.size else 0.0
+    ceiling = 10 ** (ceiling_dbfs / 20.0)
+    if peak > ceiling:
+        samples = (samples * (ceiling / peak)).astype(np.float32)
     return AudioSegment(samples=samples, sample_rate=seg.sample_rate)
 
 
@@ -172,10 +190,14 @@ def silence(duration_ms: int, sample_rate: int, channels: int = 1) -> AudioSegme
 def conform(seg: AudioSegment, cfg: AudioConfig) -> AudioSegment:
     """Bring a segment to the config's sample_rate/channels/loudness, in order.
 
-    Order: resample -> channel-conform -> peak-normalize -> loudness-normalize
-    (only if cfg.target_lufs is set). Peak normalization always runs so every
-    segment has a predictable, consistent level before optional loudness
-    matching fine-tunes it.
+    Order: resample -> channel-conform -> peak-normalize (only if
+    cfg.peak_dbfs is set) -> loudness-normalize (only if cfg.target_lufs is
+    set). Per-segment peak normalization is opt-out (cfg.peak_dbfs = None
+    skips it) because it fights an engine that already manages its own
+    output level -- re-scaling each line independently makes loudness jump
+    line to line and amplifies noise in quiet segments. Prefer target_lufs
+    on the assembled timeline (see pipeline.py) for final output leveling;
+    this per-segment pass exists for engines/configs that want it anyway.
 
     Note for pipeline.py: cache keys for synthesized segments must never
     include pause settings. Pauses (pause_between_lines_ms etc.) are generated
@@ -186,7 +208,8 @@ def conform(seg: AudioSegment, cfg: AudioConfig) -> AudioSegment:
     """
     seg = resample(seg, cfg.sample_rate)
     seg = to_channels(seg, cfg.channels)
-    seg = normalize_peak(seg, cfg.peak_dbfs)
+    if cfg.peak_dbfs is not None:
+        seg = normalize_peak(seg, cfg.peak_dbfs)
     if cfg.target_lufs is not None:
         seg = normalize_loudness(seg, cfg.target_lufs)
     return seg

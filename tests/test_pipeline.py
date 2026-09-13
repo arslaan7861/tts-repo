@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from charvoice.config import Config, EngineConfig, TTSConfig
+from charvoice.config import AudioConfig, Config, EngineConfig, TTSConfig
 from charvoice.engines.registry import clear_engine_cache
 from charvoice.errors import ScriptValidationError
 from charvoice.parser import parse_script
@@ -190,3 +190,100 @@ def test_generate_voiceover_groups_by_speaker_but_keeps_output_order(tmp_path, m
     # but the written file still has 4 segments in script order -- verified
     # indirectly: total duration should match concatenating all 4 originals
     # in order plus pauses, which other tests already confirm structurally.
+
+
+def test_resolve_engine_name_uses_profile_engine_over_default():
+    """profile.engine was previously dead metadata -- generate_voiceover used
+    one global engine for the whole script regardless of what a profile
+    said. _resolve_engine_name is the fix: each speaker resolves to their
+    own profile's engine, falling back to config.tts.default_engine only
+    when a profile doesn't name one."""
+    from charvoice.pipeline import _resolve_engine_name
+
+    profiles = ProfileStore(
+        {
+            "narrator": VoiceProfile(id="narrator", engine="dummy"),
+            "peter1": VoiceProfile(id="peter1", engine="some-other-engine"),
+        }
+    )
+    config = Config(tts=TTSConfig(default_engine="dummy"))
+
+    assert _resolve_engine_name("narrator", profiles, config) == "dummy"
+    assert _resolve_engine_name("peter1", profiles, config) == "some-other-engine"
+
+
+def test_generate_voiceover_uses_each_speakers_own_engine(tmp_path):
+    """End-to-end: two characters naming different engines in their profiles
+    each actually get synthesized by that engine, not silently coerced to
+    one global default_engine."""
+    from charvoice.engines.base import Engine, SpeakerHandle
+    from charvoice.engines.registry import register
+
+    calls: dict[str, int] = {"dummy-a": 0, "dummy-b": 0}
+
+    def _make_fake_engine(tag):
+        class _FakeEngine(Engine):
+            def load(self, engine_config):
+                pass
+
+            def prepare_speaker(self, profile):
+                return SpeakerHandle(profile=profile)
+
+            def generate_one(self, text, speaker):
+                calls[tag] += 1
+                import numpy as np
+
+                from charvoice.audio import AudioSegment
+
+                return AudioSegment(samples=np.zeros(800, dtype=np.float32), sample_rate=22050)
+
+            def model_fingerprint(self, engine_config):
+                return tag
+
+        return _FakeEngine
+
+    register("dummy-a")(_make_fake_engine("dummy-a"))
+    register("dummy-b")(_make_fake_engine("dummy-b"))
+
+    lines = parse_script("NARRATOR: one.\nPETER1: two.")
+    profiles = ProfileStore(
+        {
+            "narrator": VoiceProfile(id="narrator", engine="dummy-a"),
+            "peter1": VoiceProfile(id="peter1", engine="dummy-b"),
+        }
+    )
+    config = Config(
+        tts=TTSConfig(default_engine="dummy-a", engines={"dummy-a": EngineConfig("dummy-a")}),
+        project_dir=tmp_path,
+    )
+
+    generate_voiceover(lines, profiles, config)
+
+    assert calls["dummy-a"] == 1
+    assert calls["dummy-b"] == 1
+
+
+def test_generate_voiceover_hits_target_lufs_without_peak_limit_overshoot(tmp_path):
+    """Regression test for a real bug found during manual verification:
+    _normalize_timeline_loudness used to apply normalize_peak() after
+    normalize_loudness(), and normalize_peak always rescales to its target
+    exactly (even pulling a quiet signal UP) -- so a loudness-normalized
+    file whose peak was already under the safety ceiling got pushed back up
+    to it, overshooting the LUFS target that was just hit. Fixed by using
+    limit_peak() (a one-sided clamp) instead.
+    """
+    pyln = pytest.importorskip("pyloudnorm")
+
+    lines = parse_script("NARRATOR: one.\nSPIDER-MAN: two.\nNARRATOR: three.")
+    profiles = _dummy_profiles("narrator", "spider-man")
+    config = Config(
+        tts=TTSConfig(default_engine="dummy", engines={"dummy": EngineConfig("dummy")}),
+        audio=AudioConfig(peak_dbfs=None, target_lufs=-16.0),
+        project_dir=tmp_path,
+    )
+
+    result = generate_voiceover(lines, profiles, config, engine_name="dummy")
+
+    data, sr = sf.read(str(result.output_path))
+    measured = pyln.Meter(sr).integrated_loudness(data)
+    assert measured == pytest.approx(-16.0, abs=0.5)

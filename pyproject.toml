@@ -24,6 +24,7 @@ colab = [
     "torchaudio",
     "librosa",
     "soxr",
+    "pyloudnorm",
 ]
 # Optional high-quality resampling and loudness normalisation. The package
 # works without these; audio.py falls back to a numpy resampler.

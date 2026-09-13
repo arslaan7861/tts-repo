@@ -70,6 +70,27 @@ def available_engines() -> list[str]:
     return sorted(_REGISTRY)
 
 
+def _engine_class(name: str) -> type[Engine]:
+    _load_builtin_engines()
+    cls = _REGISTRY.get(name)
+    if cls is None:
+        available = ", ".join(available_engines()) or "(none)"
+        raise EngineNotFoundError(f'No engine registered as "{name}". Available: {available}')
+    return cls
+
+
+def probe_engine(name: str) -> Engine:
+    """An unloaded instance of the `name` engine -- never calls `load()`.
+
+    For anything that only needs an engine's static behavior (its
+    `required_profile_fields()`, say) without paying for or risking a model
+    load. Validation uses this so checking a script's profiles never
+    triggers GPU work -- see validate_script's module-level contract that it
+    runs entirely before any model is loaded.
+    """
+    return _engine_class(name)()
+
+
 def get_engine(name: str, config: Config) -> Engine:
     """Return the (possibly cached) loaded engine instance for `name`.
 
@@ -78,20 +99,13 @@ def get_engine(name: str, config: Config) -> Engine:
     notebook cell must never reload the model. A different config produces a
     new cached instance; the old one is NOT auto-unloaded.
     """
-    _load_builtin_engines()
-
-    cls = _REGISTRY.get(name)
-    if cls is None:
-        available = ", ".join(available_engines()) or "(none)"
-        raise EngineNotFoundError(f'No engine registered as "{name}". Available: {available}')
-
+    cls = _engine_class(name)
     engine_config: EngineConfig = config.tts.engine(name)
 
     # Fingerprinting needs an instance, but we must not create/load a second
     # real one just to compute it -- an unloaded throwaway instance is cheap
     # (model_fingerprint only touches engine_config / checkpoint files).
-    probe = cls()
-    fingerprint = probe.model_fingerprint(engine_config)
+    fingerprint = probe_engine(name).model_fingerprint(engine_config)
     cache_key = (name, fingerprint)
 
     cached = _INSTANCE_CACHE.get(cache_key)

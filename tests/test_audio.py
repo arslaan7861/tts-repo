@@ -13,6 +13,7 @@ from charvoice.audio import (
     StreamingWavWriter,
     conform,
     export_mp3,
+    limit_peak,
     normalize_peak,
     resample,
     silence,
@@ -205,3 +206,64 @@ def test_conform_round_trips_to_config() -> None:
     assert out.channels == cfg.channels
     peak = np.max(np.abs(out.samples))
     assert 20 * np.log10(peak) == pytest.approx(cfg.peak_dbfs, abs=0.01)
+
+
+def test_conform_skips_peak_normalization_when_peak_dbfs_is_none() -> None:
+    """peak_dbfs=None is how an engine that already manages its own output
+    level (e.g. F5-TTS's internal target_rms) avoids conform() re-scaling
+    each segment independently -- which would otherwise make loudness jump
+    line to line and amplify noise in quiet segments."""
+    cfg = AudioConfig(sample_rate=16000, channels=1, peak_dbfs=None)
+    rng = np.random.default_rng(2)
+    samples = (rng.random(1000).astype(np.float32) - 0.5) * 0.1
+    seg = AudioSegment(samples=samples, sample_rate=16000)
+
+    out = conform(seg, cfg)
+
+    # same sample rate/channels, so no resample/channel-conform touched the
+    # values either -- the samples should be untouched, byte for byte
+    np.testing.assert_array_equal(out.samples, seg.samples)
+
+
+def test_conform_still_resamples_when_peak_dbfs_is_none() -> None:
+    """peak_dbfs=None only skips the peak step -- resample/channel-conform
+    still run."""
+    cfg = AudioConfig(sample_rate=8000, channels=1, peak_dbfs=None)
+    seg = AudioSegment(samples=np.zeros(16000, dtype=np.float32), sample_rate=16000)
+
+    out = conform(seg, cfg)
+
+    assert out.sample_rate == 8000
+    assert len(out.samples) == pytest.approx(8000, abs=1)
+
+
+def test_limit_peak_leaves_quiet_signal_untouched() -> None:
+    """The bug this function fixes: normalize_peak always rescales to hit
+    its target exactly, which pulled a signal already under a loudness
+    normalization's resulting peak back UP to the ceiling -- overshooting
+    the loudness target that was just achieved. limit_peak must never raise
+    the level."""
+    samples = np.full(100, 0.1, dtype=np.float32)  # peak ~-20 dBFS
+    seg = AudioSegment(samples=samples, sample_rate=16000)
+
+    out = limit_peak(seg, ceiling_dbfs=-1.0)
+
+    np.testing.assert_array_equal(out.samples, seg.samples)
+
+
+def test_limit_peak_scales_down_when_over_ceiling() -> None:
+    samples = np.full(100, 0.9, dtype=np.float32)  # peak ~-0.9 dBFS
+    seg = AudioSegment(samples=samples, sample_rate=16000)
+
+    out = limit_peak(seg, ceiling_dbfs=-6.0)
+
+    peak = np.max(np.abs(out.samples))
+    assert 20 * np.log10(peak) == pytest.approx(-6.0, abs=0.01)
+
+
+def test_limit_peak_leaves_silence_untouched() -> None:
+    seg = AudioSegment(samples=np.zeros(100, dtype=np.float32), sample_rate=16000)
+
+    out = limit_peak(seg, ceiling_dbfs=-1.0)
+
+    assert np.max(np.abs(out.samples)) == 0.0

@@ -32,7 +32,13 @@ class AudioConfig:
     # Applied after a narrator line instead of the default pause. None means
     # "use pause_between_lines_ms".
     pause_after_narrator_ms: int | None = None
-    peak_dbfs: float = -1.0
+    # None skips per-segment peak normalization entirely -- useful when the
+    # engine already manages its own output level (e.g. F5-TTS's internal
+    # target_rms) and independently re-scaling each line would fight it,
+    # amplifying noise in quiet segments and making loudness jump line to
+    # line. Prefer target_lufs (normalizes the whole assembled timeline
+    # once) over this for final output leveling.
+    peak_dbfs: float | None = -1.0
     # Loudness normalisation is opt-in; it needs the optional pyloudnorm dep.
     target_lufs: float | None = None
 
@@ -106,6 +112,14 @@ class Config:
     def with_project_dir(self, project_dir: Path | str) -> Config:
         """Re-base every relative path onto a new directory (used after mounting Drive)."""
         return replace(self, project_dir=Path(project_dir).expanduser().resolve())
+
+    def with_default_engine(self, engine_name: str) -> Config:
+        """Override `tts.default_engine` (e.g. a CLI --engine flag).
+
+        Only changes the fallback used when a speaker's own profile doesn't
+        name an engine -- a profile's explicit `engine:` still wins.
+        """
+        return replace(self, tts=replace(self.tts, default_engine=engine_name))
 
 
 def resolve_path(base: Path | str, value: Path | str) -> Path:

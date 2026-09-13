@@ -9,6 +9,8 @@ modules land -- no edits needed here.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -253,3 +255,133 @@ def test_gpt_sovits_module_imports_and_instantiates_without_torch():
     engine = gpt_sovits_module.GPTSoVITSEngine()
     assert engine is not None
     assert engine.required_profile_fields() == {"reference_audio", "reference_text"}
+
+
+# --------------------------------------------------------------------------
+# F5-TTS: tuning defaults, fingerprint sensitivity, param passthrough
+# --------------------------------------------------------------------------
+
+
+def test_f5_tts_module_imports_and_instantiates_without_torch():
+    """Importing and instantiating must succeed with no torch installed --
+    only .load() is allowed to need torch, same contract as gpt_sovits.py."""
+    import charvoice.engines.f5_tts as f5_module
+
+    engine = f5_module.F5TTSEngine()
+    assert engine is not None
+    assert engine.required_profile_fields() == {"reference_audio", "reference_text"}
+
+
+def test_f5_tts_fingerprint_changes_with_any_tuning_value():
+    """The regression guard for the original bug: model_fingerprint() used
+    to be a hardcoded constant, so changing nfe_step (or any other tuning
+    value) never invalidated the segment cache -- a re-run would silently
+    serve back old cached audio instead of regenerating with the new
+    setting."""
+    import charvoice.engines.f5_tts as f5_module
+
+    engine = f5_module.F5TTSEngine()
+    base = EngineConfig(name="f5-tts", extra={"nfe_step": 32})
+    changed_nfe = EngineConfig(name="f5-tts", extra={"nfe_step": 64})
+    changed_model = EngineConfig(name="f5-tts", extra={"nfe_step": 32, "model": "F5TTS_Base"})
+
+    fp_base = engine.model_fingerprint(base)
+    fp_nfe = engine.model_fingerprint(changed_nfe)
+    fp_model = engine.model_fingerprint(changed_model)
+
+    assert fp_base != fp_nfe
+    assert fp_base != fp_model
+    assert fp_nfe != fp_model
+
+
+def test_f5_tts_fingerprint_stable_for_identical_config():
+    import charvoice.engines.f5_tts as f5_module
+
+    engine = f5_module.F5TTSEngine()
+    cfg = EngineConfig(name="f5-tts", extra={"nfe_step": 48, "cfg_strength": 2.0})
+
+    assert engine.model_fingerprint(cfg) == engine.model_fingerprint(cfg)
+    # a second instance with the same config must agree too -- the
+    # fingerprint is a pure function of engine_config, not per-instance state
+    assert f5_module.F5TTSEngine().model_fingerprint(cfg) == engine.model_fingerprint(cfg)
+
+
+def test_f5_tts_tuning_defaults_are_quality_first():
+    """Confirms the specific defaults the plan calls for, so a future edit
+    that accidentally reverts to F5's speed-first library defaults (e.g.
+    nfe_step back to 32, remove_silence back to False) is caught here."""
+    import charvoice.engines.f5_tts as f5_module
+
+    tuning = f5_module._tuning_from(EngineConfig(name="f5-tts"))
+
+    assert tuning["nfe_step"] == 48
+    assert tuning["remove_silence"] is True
+    assert tuning["cfg_strength"] == 2.0
+    assert tuning["sway_sampling_coef"] == -1.0
+    assert tuning["cross_fade_duration"] == 0.15
+    assert tuning["target_rms"] == 0.1
+
+
+def test_f5_tts_tuning_overridable_via_extra():
+    import charvoice.engines.f5_tts as f5_module
+
+    tuning = f5_module._tuning_from(EngineConfig(name="f5-tts", extra={"nfe_step": 64}))
+
+    assert tuning["nfe_step"] == 64
+    assert tuning["remove_silence"] is True  # untouched keys keep their default
+
+
+def test_f5_tts_unknown_extra_keys_do_not_leak_into_tuning():
+    import charvoice.engines.f5_tts as f5_module
+
+    tuning = f5_module._tuning_from(EngineConfig(name="f5-tts", extra={"some_other_setting": 1}))
+
+    assert "some_other_setting" not in tuning
+
+
+def test_f5_tts_generate_one_passes_tuning_and_seed_to_infer(monkeypatch):
+    """generate_one() must forward every tuning value to F5TTS.infer(), and
+    a fixed, derived seed -- not F5's own seed=None default, which would
+    make output non-deterministic and silently break the segment cache's
+    premise that identical inputs produce identical audio."""
+    import charvoice.engines.f5_tts as f5_module
+
+    captured: dict = {}
+
+    class FakeF5:
+        def infer(self, **kwargs):
+            captured.update(kwargs)
+            return np.zeros(100, dtype=np.float32), 24000, None
+
+    engine = f5_module.F5TTSEngine()
+    engine._f5tts = FakeF5()
+    engine._tuning = f5_module._tuning_from(EngineConfig(name="f5-tts", extra={"nfe_step": 64}))
+
+    profile = VoiceProfile(
+        id="peter1",
+        engine="f5-tts",
+        reference_audio=Path("/tmp/ref.wav"),
+        reference_text="hello there",
+        speed=1.2,
+    )
+    handle = engine.prepare_speaker(profile)
+    engine.generate_one("Some line of dialogue.", handle)
+
+    assert captured["nfe_step"] == 64
+    assert captured["remove_silence"] is True
+    assert captured["speed"] == 1.2
+    assert captured["ref_text"] == "hello there"
+    assert isinstance(captured["seed"], int)
+
+
+def test_f5_tts_seed_is_deterministic_per_speaker_and_text():
+    import charvoice.engines.f5_tts as f5_module
+
+    a1 = f5_module._seed_for("peter1", "Hello there.")
+    a2 = f5_module._seed_for("peter1", "Hello there.")
+    b = f5_module._seed_for("peter1", "A different line.")
+    c = f5_module._seed_for("miles", "Hello there.")
+
+    assert a1 == a2  # same speaker+text -> same seed, every time
+    assert a1 != b  # different text -> different seed
+    assert a1 != c  # different speaker -> different seed
