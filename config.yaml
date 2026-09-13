@@ -21,7 +21,11 @@ tts:
       # silently serving back old cached audio.
       model: F5TTS_v1_Base
       nfe_step: 48          # flow-matching solver steps; main quality knob
-      cfg_strength: 2.0
+      # Raised from F5's default 2.0: low guidance let the model drift off
+      # the reference voice's prosody/energy mid-utterance, surfacing as
+      # volume dips partway through a sentence that recover afterward.
+      # Higher values hold the voice closer to the reference throughout.
+      cfg_strength: 4.0
       sway_sampling_coef: -1.0
       cross_fade_duration: 0.15
       target_rms: 0.1
