@@ -122,6 +122,90 @@ def test_seed_skips_missing_sources_without_raising(tmp_path):
     _seed_drive_project_dir(project_dir, repo_dir)  # must not raise
 
 
+def test_seed_refreshes_a_character_folder_untouched_since_last_seed(tmp_path):
+    """The bug this guards against: a repo update (new engine, new
+    reference audio) must reach Drive on a later mount, as long as the
+    user never touched that Drive copy themselves -- otherwise every repo
+    fix silently stops working for anyone whose Drive was seeded before
+    the fix landed."""
+    repo_dir = tmp_path / "repo"
+    (repo_dir / "voices" / "miles").mkdir(parents=True)
+    (repo_dir / "voices" / "miles" / "profile.yaml").write_text("engine: gpt-sovits\n")
+
+    project_dir = tmp_path / "drive_project"
+    project_dir.mkdir()
+
+    _seed_drive_project_dir(project_dir, repo_dir)
+    assert "gpt-sovits" in (project_dir / "voices" / "miles" / "profile.yaml").read_text()
+
+    # repo is updated (e.g. a later git pull) -- Drive's copy is untouched
+    (repo_dir / "voices" / "miles" / "profile.yaml").write_text("engine: f5-tts\n")
+
+    _seed_drive_project_dir(project_dir, repo_dir)
+
+    assert "f5-tts" in (project_dir / "voices" / "miles" / "profile.yaml").read_text()
+
+
+def test_seed_still_protects_a_character_folder_edited_after_seeding(tmp_path):
+    """The existing guarantee must survive the refresh logic: once the user
+    edits a Drive copy, a later repo update must never overwrite it, even
+    though it was seeded (and therefore has a manifest entry) earlier."""
+    repo_dir = tmp_path / "repo"
+    (repo_dir / "voices" / "miles").mkdir(parents=True)
+    (repo_dir / "voices" / "miles" / "profile.yaml").write_text("engine: gpt-sovits\n")
+
+    project_dir = tmp_path / "drive_project"
+    project_dir.mkdir()
+
+    _seed_drive_project_dir(project_dir, repo_dir)
+
+    # user hand-edits the Drive copy
+    (project_dir / "voices" / "miles" / "profile.yaml").write_text(
+        "engine: gpt-sovits  # my own tweak\n"
+    )
+
+    # repo is updated
+    (repo_dir / "voices" / "miles" / "profile.yaml").write_text("engine: f5-tts\n")
+
+    _seed_drive_project_dir(project_dir, repo_dir)
+
+    assert "my own tweak" in (project_dir / "voices" / "miles" / "profile.yaml").read_text()
+
+
+def test_seed_refreshes_config_yaml_untouched_since_last_seed(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "config.yaml").write_text("tts:\n  default_engine: gpt-sovits\n")
+
+    project_dir = tmp_path / "drive_project"
+    project_dir.mkdir()
+
+    _seed_drive_project_dir(project_dir, repo_dir)
+    assert "gpt-sovits" in (project_dir / "config.yaml").read_text()
+
+    (repo_dir / "config.yaml").write_text("tts:\n  default_engine: f5-tts\n")
+    _seed_drive_project_dir(project_dir, repo_dir)
+
+    assert "f5-tts" in (project_dir / "config.yaml").read_text()
+
+
+def test_seed_still_protects_a_hand_edited_config_yaml(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "config.yaml").write_text("tts:\n  default_engine: gpt-sovits\n")
+
+    project_dir = tmp_path / "drive_project"
+    project_dir.mkdir()
+
+    _seed_drive_project_dir(project_dir, repo_dir)
+    (project_dir / "config.yaml").write_text("tts:\n  default_engine: dummy  # my choice\n")
+
+    (repo_dir / "config.yaml").write_text("tts:\n  default_engine: f5-tts\n")
+    _seed_drive_project_dir(project_dir, repo_dir)
+
+    assert "my choice" in (project_dir / "config.yaml").read_text()
+
+
 def test_fetch_model_gpt_sovits_skips_present_sources(tmp_path, monkeypatch):
     """Re-running the fetch cell must not re-clone anything already present."""
     model_dir = tmp_path / "gpt-sovits"

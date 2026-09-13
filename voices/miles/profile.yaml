@@ -1,5 +1,5 @@
 engine: f5-tts
 reference_audio: reference.wav
-reference_text: "Okay, so here's the thing nobody tells you about this job. Half of it is showing up. The other half is figuring out what you're actually supposed to do once you're there. People think it's all the swinging and the punching, and sure, that part's great, I won't lie. But mostly it's choices. Small ones, fast ones, the kind you don't get to take back. I used to think I'd grow into it. Turns out you just get used to deciding quickly."
+reference_text: "Okay, so here's the thing nobody tells you about this job. Half of it is showing up. The other half is figuring out what you're actually supposed to do once you're there. People think it's all the swinging and the punching, and sure, that part's great, I won't lie."
 language: en
 speed: 1.0

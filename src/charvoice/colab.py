@@ -9,6 +9,8 @@ function outside Colab is refused, and only where it would not make sense
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -24,6 +26,14 @@ from charvoice.config import Config, EngineConfig
 # later still reaches Drive; scripts/config.yaml are copied once, whole, since
 # partially merging a user's edited config.yaml would be worse than skipping it.
 _SEED_WHOLE_ENTRIES = ("scripts", "config.yaml")
+
+# Records the hash of what *we* last wrote for each seeded path, so a later
+# mount can tell "untouched since we seeded it -- safe to refresh to the
+# repo's newer version" apart from "the user edited this -- never touch it".
+# Lives inside the Drive project dir itself (not the repo), since it tracks
+# that Drive copy's seeding history. Hidden (leading dot) so it doesn't show
+# up as a stray file alongside voices/scripts/config.yaml.
+_SEED_MANIFEST_NAME = ".charvoice_seed_manifest.json"
 
 
 def in_colab() -> bool:
@@ -98,14 +108,84 @@ def setup_colab_environment(
     return repo_dir
 
 
-def _seed_voice_profiles(project_dir: Path, repo_dir: Path) -> None:
-    """Copy any character folder from the repo that Drive doesn't have yet.
+def _hash_path(path: Path) -> str:
+    """sha256 over a file's bytes, or over a directory's relative file tree.
+
+    Directory hashing walks files in sorted relative-path order so the result
+    only depends on content, never on filesystem iteration order.
+    """
+    digest = hashlib.sha256()
+    if path.is_dir():
+        for file in sorted(p for p in path.rglob("*") if p.is_file()):
+            digest.update(str(file.relative_to(path)).encode())
+            digest.update(file.read_bytes())
+    else:
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _load_seed_manifest(project_dir: Path) -> dict[str, str]:
+    manifest_path = project_dir / _SEED_MANIFEST_NAME
+    if not manifest_path.is_file():
+        return {}
+    try:
+        return json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_seed_manifest(project_dir: Path, manifest: dict[str, str]) -> None:
+    manifest_path = project_dir / _SEED_MANIFEST_NAME
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+
+
+def _refresh_seeded_path(
+    manifest_key: str,
+    src: Path,
+    dest: Path,
+    manifest: dict[str, str],
+) -> bool:
+    """Copy `src` to `dest`, but only if `dest` is either absent or still
+    exactly what we last seeded there.
+
+    This is what lets a later mount pick up the repo's newer starter content
+    (a bumped default_engine, a replaced reference.wav, ...) without ever
+    clobbering a file the user actually hand-edited on Drive: a Drive copy
+    that still matches its last-recorded seed hash was never touched by the
+    user, so it's safe to overwrite; a copy whose hash has drifted was
+    touched, so it's left alone exactly like before this manifest existed.
+    Returns True if a copy happened.
+    """
+    previously_seeded_hash = manifest.get(manifest_key)
+    if dest.exists():
+        untouched_since_last_seed = (
+            previously_seeded_hash is not None and _hash_path(dest) == previously_seeded_hash
+        )
+        if not untouched_since_last_seed:
+            return False
+        if dest.is_dir():
+            shutil.rmtree(dest)
+        else:
+            dest.unlink()
+
+    if src.is_dir():
+        shutil.copytree(src, dest)
+    else:
+        shutil.copyfile(src, dest)
+    manifest[manifest_key] = _hash_path(src)
+    return True
+
+
+def _seed_voice_profiles(project_dir: Path, repo_dir: Path, manifest: dict[str, str]) -> None:
+    """Seed/refresh each repo character folder that Drive hasn't hand-edited.
 
     Per-folder, not whole-or-nothing: a character added to the repo after
     Drive was first seeded (e.g. a new `voices/peter1/`) must still reach
-    Drive on a later mount. An existing Drive character folder -- the user's
-    own edits, or a profile already seeded -- is never touched, so this is
-    safe to run on every mount, not just the first.
+    Drive on a later mount. A Drive character folder the user has edited
+    since it was last seeded is never touched; one that's untouched is
+    refreshed to the repo's current version, so e.g. updated reference audio
+    or an `engine:` change actually reaches Drive instead of being stuck at
+    whatever was seeded the first time this project dir was mounted.
     """
     src_voices = repo_dir / "voices"
     if not src_voices.is_dir():
@@ -116,10 +196,9 @@ def _seed_voice_profiles(project_dir: Path, repo_dir: Path) -> None:
 
     for character_dir in sorted(p for p in src_voices.iterdir() if p.is_dir()):
         dest = dest_voices / character_dir.name
-        if dest.exists():
-            continue
-        shutil.copytree(character_dir, dest)
-        print(f"  copied voices/{character_dir.name}")
+        key = f"voices/{character_dir.name}"
+        if _refresh_seeded_path(key, character_dir, dest, manifest):
+            print(f"  copied voices/{character_dir.name}")
 
 
 def _seed_drive_project_dir(project_dir: Path, repo_dir: Path) -> None:
@@ -129,24 +208,25 @@ def _seed_drive_project_dir(project_dir: Path, repo_dir: Path) -> None:
     does. Without seeding, `config.resolve("voices")` would silently point
     at an empty Drive directory and every profile lookup would report
     "no voice profile" even though the repo's profiles are right there (the
-    bug this function exists to prevent). Voice profiles are seeded per
-    character folder on every call (see `_seed_voice_profiles`); `scripts/`
-    and `config.yaml` are copied once, whole, only if Drive doesn't have its
-    own copy yet.
+    bug this function exists to prevent). Every entry seeded here is
+    refreshed on later mounts too, as long as Drive's copy is still exactly
+    what was last seeded -- see `_refresh_seeded_path`. A copy the user has
+    since hand-edited is left alone.
     """
     print(f"Seeding {project_dir} with any new starter files from the repo...")
-    _seed_voice_profiles(project_dir, repo_dir)
+    manifest = _load_seed_manifest(project_dir)
+
+    _seed_voice_profiles(project_dir, repo_dir, manifest)
 
     for name in _SEED_WHOLE_ENTRIES:
         src = repo_dir / name
         dest = project_dir / name
-        if not src.exists() or dest.exists():
+        if not src.exists():
             continue
-        if src.is_dir():
-            shutil.copytree(src, dest)
-        else:
-            shutil.copyfile(src, dest)
-        print(f"  copied {name}")
+        if _refresh_seeded_path(name, src, dest, manifest):
+            print(f"  copied {name}")
+
+    _save_seed_manifest(project_dir, manifest)
 
 
 def mount_drive(

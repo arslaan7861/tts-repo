@@ -1,6 +1,0 @@
-# Works out of the box with the "dummy" engine (no reference audio needed).
-# Switch engine to gpt-sovits and add reference_audio/reference_text to clone
-# a real voice -- see requirements.md section 4.
-engine: dummy
-language: en
-speed: 1.0
